@@ -1,0 +1,6 @@
+{
+  "name": "ElektroPlan 3D/2D — CAD Planer Elektroinstalacija",
+  "description": "Inženjerska aplikacija za 3D/2D projektiranje električnih instalacija, rasklop zidova i stropa, izračun kabela i bužira, opterećenje strujnih krugova i sheme spajanja vodiča (L, N, PE).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
