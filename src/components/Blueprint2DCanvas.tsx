@@ -1,15 +1,31 @@
-import React, { useRef, useState } from 'react';
-import { ZoomIn, ZoomOut } from 'lucide-react';
-import { CONDUCTOR_META, ELEMENT_CATALOG, WALL_META } from '../data/presets';
+import React, {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from 'react';
+import { Maximize, ZoomIn, ZoomOut } from 'lucide-react';
+import { CONDUCTOR_META, WALL_META } from '../data/presets';
 import {
   computeSnapAndDimensions,
   getOrderedWallsAroundCenter,
   getPrimaryJunctionBoxWall,
-  getSurfaceSize,
   SnapResult,
 } from '../engine/electricalEngine';
 import {
-  ApplianceItem,
+  Box,
+  ceilingToView,
+  ELEMENT_FOOTPRINT,
+  formatMeters,
+  getCeilingViewSize,
+  getSurfaceSize,
+  isNodeOutsideSurface,
+  placeLabels,
+  Point,
+  viewToCeiling,
+} from '../engine/geometry';
+import {
   ElectricalCircuit,
   ElectricalNode,
   ElementCategory,
@@ -20,1133 +36,838 @@ import {
   WallOpening,
 } from '../types/electrical';
 
-interface Blueprint2DCanvasProps {
+export interface CanvasLayers {
+  wires: boolean;
+  zones: boolean;
+  dimensions: boolean;
+  snap: boolean;
+}
+
+export interface CanvasHandle {
+  previewPaletteDrop: (clientX: number, clientY: number) => void;
+  commitPaletteDrop: (
+    category: ElementCategory,
+    clientX: number,
+    clientY: number
+  ) => void;
+  clearPreview: () => void;
+}
+
+interface Props {
   room: RoomDimensions;
   openings: WallOpening[];
   nodes: ElectricalNode[];
   circuits: ElectricalCircuit[];
   segments: RoutedSegment[];
-  appliances: ApplianceItem[];
   activeSurface: SurfaceId;
   layoutMode: 'strip_all' | 'single_surface';
-  showWireConductors: boolean;
-  showInstallZones: boolean;
-  showAllDimensions: boolean;
-  enableSnap: boolean;
+  layers: CanvasLayers;
   selectedNodeId: string | null;
-  activeCircuitFilter: string;
-  draggingPaletteCategory: ElementCategory | null;
-  onSelectSurface: (s: SurfaceId) => void;
+  circuitFilter: string;
+  canDrag: boolean;
+  onSelectSurface: (surface: SurfaceId) => void;
   onSelectNode: (id: string | null) => void;
-  onUpdateNodePosition: (nodeId: string, surface: SurfaceId, x: number, y: number) => void;
+  onMoveNode: (id: string, surface: SurfaceId, x: number, y: number, dragKey: string) => void;
   onDropNewNode: (category: ElementCategory, surface: SurfaceId, x: number, y: number) => void;
-  onInspectWiring: (nodeId: string) => void;
+  onBlockedDrop: (message: string) => void;
 }
 
 interface SurfaceRect {
   surface: SurfaceId;
-  title: string;
-  subtitle: string;
-  svgX: number;
-  svgY: number;
-  widthMeters: number;
-  heightMeters: number;
-  pxWidth: number;
-  pxHeight: number;
-  hasJunctionBox?: boolean;
+  caption: string;
+  /** Position in metres within the drawing. */
+  xM: number;
+  yM: number;
+  widthM: number;
+  heightM: number;
 }
 
-export const Blueprint2DCanvas: React.FC<Blueprint2DCanvasProps> = ({
-  room,
-  openings,
-  nodes,
-  circuits,
-  segments,
-  appliances,
-  activeSurface,
-  layoutMode,
-  showWireConductors,
-  showInstallZones,
-  showAllDimensions,
-  enableSnap,
-  selectedNodeId,
-  activeCircuitFilter,
-  draggingPaletteCategory,
-  onSelectSurface,
-  onSelectNode,
-  onUpdateNodePosition,
-  onDropNewNode,
-  onInspectWiring,
-}) => {
+const INK = '#222222';
+const WALL = '#111111';
+const GRID = '#E2E2DE';
+const OPENING = '#ECECE8';
+const OPENING_LINE = '#333333';
+const SELECT = '#C2007A';
+const ERROR = '#B3261E';
+const PAD_X = 34;
+const PAD_TOP = 14;
+const PAD_BOTTOM = 46;
+const ZOOM_STEP = 1.25;
+const SHORT: Record<WallId, string> = {
+  north: 'Sjever',
+  east: 'Istok',
+  south: 'Jug',
+  west: 'Zapad',
+};
+
+function buildRects(
+  room: RoomDimensions,
+  center: WallId,
+  layoutMode: Props['layoutMode'],
+  activeSurface: SurfaceId
+): { rects: SurfaceRect[]; widthM: number; heightM: number } {
+  const dims = (w: number, h: number) => `${formatMeters(w)} × ${formatMeters(h)} m`;
+  const ceiling = getCeilingViewSize(room, center);
+
+  if (layoutMode === 'single_surface') {
+    const size =
+      activeSurface === 'ceiling' ? ceiling : getSurfaceSize(activeSurface, room);
+    return {
+      rects: [
+        {
+          surface: activeSurface,
+          caption: `${
+            activeSurface === 'ceiling' ? 'Strop' : WALL_META[activeSurface].name
+          } · ${dims(size.width, size.height)}`,
+          xM: 0,
+          yM: 0,
+          widthM: size.width,
+          heightM: size.height,
+        },
+      ],
+      widthM: size.width,
+      heightM: size.height,
+    };
+  }
+
+  const rects: SurfaceRect[] = [];
+  let x = 0;
+  for (const wall of getOrderedWallsAroundCenter(center)) {
+    const { width, height } = getSurfaceSize(wall, room);
+    rects.push({
+      surface: wall,
+      caption: `${SHORT[wall]} · ${dims(width, height)}`,
+      xM: x,
+      yM: ceiling.height,
+      widthM: width,
+      heightM: height,
+    });
+    x += width;
+  }
+  const centerRect = rects.find((r) => r.surface === center)!;
+  rects.unshift({
+    surface: 'ceiling',
+    caption: `Strop · ${dims(ceiling.width, ceiling.height)}`,
+    xM: centerRect.xM,
+    yM: 0,
+    widthM: ceiling.width,
+    heightM: ceiling.height,
+  });
+  return { rects, widthM: x, heightM: ceiling.height + room.height };
+}
+
+function offsetPath(points: { x: number; y: number }[], offset: number): string {
+  const shifted = points.map((p) => ({ ...p }));
+  if (Math.abs(offset) > 0.01) {
+    for (let i = 0; i < points.length - 1; i++) {
+      const horizontal =
+        Math.abs(points[i + 1].x - points[i].x) >=
+        Math.abs(points[i + 1].y - points[i].y);
+      const key = horizontal ? 'y' : 'x';
+      shifted[i][key] = points[i][key] + offset;
+      shifted[i + 1][key] = points[i + 1][key] + offset;
+    }
+  }
+  return shifted.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x} ${p.y}`).join(' ');
+}
+
+const CHAR_WIDTH = 5.7;
+
+type OpeningLabel =
+  | { kind: 'inside'; lines: string[] }
+  | { kind: 'rotated'; text: string }
+  | { kind: 'outside'; lines: string[]; x: number; y: number; box: Box };
+
+/** Picks a readable place for an opening's typed size at the current scale. */
+function layoutOpeningLabel(
+  op: WallOpening,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  surface: { x: number; y: number; width: number; height: number }
+): OpeningLabel {
+  const name = op.type === 'door' ? 'Vrata' : 'Prozor';
+  const size = `${formatMeters(op.width)} × ${formatMeters(op.height)}`;
+  if (w >= size.length * CHAR_WIDTH + 6 && h >= 30) {
+    return { kind: 'inside', lines: [name, size] };
+  }
+  const first = `${formatMeters(op.width)} ×`;
+  if (w >= Math.max(name.length, first.length) * CHAR_WIDTH + 4 && h >= 44) {
+    return { kind: 'inside', lines: [name, first, formatMeters(op.height)] };
+  }
+  const text = `${name} ${size}`;
+  const textWidth = text.length * CHAR_WIDTH + 4;
+  if (w >= 16 && h >= textWidth + 6) return { kind: 'rotated', text };
+  const floor = surface.y + surface.height;
+  if (y + h + 44 <= floor) {
+    const lines = [name, first, formatMeters(op.height)];
+    const width = Math.max(name.length, first.length) * CHAR_WIDTH + 4;
+    const left = Math.min(x, surface.x + surface.width - width);
+    return {
+      kind: 'outside',
+      lines,
+      x: left,
+      y: y + h + 13,
+      box: [left, y + h + 2, width, 40],
+    };
+  }
+  const left = Math.min(x, surface.x + surface.width - textWidth);
+  return {
+    kind: 'outside',
+    lines: [text],
+    x: left,
+    y: y - 4,
+    box: [left, y - 15, textWidth, 15],
+  };
+}
+
+function niceBarMeters(scale: number): number {
+  for (const m of [0.1, 0.25, 0.5, 1, 2, 5]) {
+    if (m * scale >= 50) return m;
+  }
+  return 10;
+}
+
+export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Blueprint2DCanvas(
+  {
+    room,
+    openings,
+    nodes,
+    circuits,
+    segments,
+    activeSurface,
+    layoutMode,
+    layers,
+    selectedNodeId,
+    circuitFilter,
+    canDrag,
+    onSelectSurface,
+    onSelectNode,
+    onMoveNode,
+    onDropNewNode,
+    onBlockedDrop,
+  },
+  ref
+) {
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
-  const [hoveredSegmentId, setHoveredSegmentId] = useState<string | null>(null);
-  const [zoomPercent, setZoomPercent] = useState<number>(115);
-  const [hoverSnap, setHoverSnap] = useState<{
+  const [viewport, setViewport] = useState({ width: 800, height: 500 });
+  const [zoom, setZoom] = useState(1);
+  const [dragging, setDragging] = useState<{ id: string; key: string } | null>(null);
+  const [snapPreview, setSnapPreview] = useState<{
     surface: SurfaceId;
     snap: SnapResult;
   } | null>(null);
+  const dragCounter = useRef(0);
 
-  const selectedNode = nodes.find((n) => n.id === selectedNodeId) || null;
-  const activeFocusNodeId = draggingNodeId || hoveredNodeId || selectedNodeId;
-
-  // The wall with the primary/selected junction box sits in the MIDDLE,
-  // with its left neighbor on the left, right neighbor on the right, and Strop directly above it!
-  const junctionBoxWall: WallId = getPrimaryJunctionBoxWall(nodes, selectedNodeId);
-  const wallOrder = getOrderedWallsAroundCenter(junctionBoxWall);
-
-  const baseScale = layoutMode === 'single_surface' ? 180 : 105;
-  const SCALE = Math.round((baseScale * zoomPercent) / 100);
-  const WALL_GAP = Math.round(24 * (zoomPercent / 100));
-  const PADDING = 44;
-
-  const surfaceRects: SurfaceRect[] = [];
-
-  if (layoutMode === 'single_surface') {
-    const { width, height } = getSurfaceSize(activeSurface, room);
-    const title =
-      activeSurface === 'ceiling' ? 'Strop' : WALL_META[activeSurface].name;
-    const subtitle = `${width.toFixed(2)} × ${height.toFixed(2)} m`;
-    surfaceRects.push({
-      surface: activeSurface,
-      title,
-      subtitle,
-      svgX: PADDING,
-      svgY: PADDING,
-      widthMeters: width,
-      heightMeters: height,
-      pxWidth: width * SCALE,
-      pxHeight: height * SCALE,
-      hasJunctionBox: nodes.some(
-        (n) => n.surface === activeSurface && n.category === 'junction_box'
-      ),
+  useEffect(() => {
+    const element = scrollerRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setViewport({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      });
     });
-  } else {
-    // 4 walls in a row: [leftWall, centerWall (with RK), rightWall, oppositeWall] + Ceiling above centerWall
-    const wallH = room.height * SCALE;
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
-    const isEastOrWest =
-      junctionBoxWall === 'east' || junctionBoxWall === 'west';
-    const ceilWidthMeters = isEastOrWest ? room.width : room.length;
-    const ceilHeightMeters = isEastOrWest ? room.length : room.width;
-    const ceilPxW = ceilWidthMeters * SCALE;
-    const ceilPxH = ceilHeightMeters * SCALE;
+  const center = getPrimaryJunctionBoxWall(nodes, selectedNodeId);
+  const wallRects = buildRects(room, center, layoutMode, activeSurface);
+  const { rects, widthM, heightM } = wallRects;
 
-    const wallRowY = PADDING + ceilPxH + WALL_GAP + 22;
-    let currentX = PADDING;
+  // One factor for both axes, so the drawing can never be stretched.
+  const fitScale = Math.max(
+    8,
+    Math.min(
+      (viewport.width - PAD_X * 2) / widthM,
+      (viewport.height - PAD_TOP - PAD_BOTTOM) / heightM
+    )
+  );
+  const scale = fitScale * zoom;
+  const svgWidth = widthM * scale + PAD_X * 2;
+  const svgHeight = heightM * scale + PAD_TOP + PAD_BOTTOM;
 
-    const wallRectMap: Record<WallId, SurfaceRect> = {} as Record<
-      WallId,
-      SurfaceRect
-    >;
+  const rectOf = (surface: SurfaceId) => rects.find((r) => r.surface === surface);
+  const pxRect = (r: SurfaceRect) => ({
+    x: PAD_X + r.xM * scale,
+    y: PAD_TOP + r.yM * scale,
+    width: r.widthM * scale,
+    height: r.heightM * scale,
+  });
 
-    for (let i = 0; i < wallOrder.length; i++) {
-      const wId = wallOrder[i];
-      const { width } = getSurfaceSize(wId, room);
-      const pxW = width * SCALE;
-      const hasRk = nodes.some(
-        (n) => n.surface === wId && n.category === 'junction_box'
-      );
-
-      const rect: SurfaceRect = {
-        surface: wId,
-        title: WALL_META[wId].name,
-        subtitle: `${width.toFixed(2)} × ${room.height.toFixed(2)} m`,
-        svgX: currentX,
-        svgY: wallRowY,
-        widthMeters: width,
-        heightMeters: room.height,
-        pxWidth: pxW,
-        pxHeight: wallH,
-        hasJunctionBox: hasRk,
-      };
-      surfaceRects.push(rect);
-      wallRectMap[wId] = rect;
-      currentX += pxW + WALL_GAP;
-    }
-
-    const targetWallRect = wallRectMap[junctionBoxWall];
-    surfaceRects.unshift({
-      surface: 'ceiling',
-      title: 'Strop',
-      subtitle: `${ceilWidthMeters.toFixed(2)} × ${ceilHeightMeters.toFixed(2)} m`,
-      svgX: targetWallRect.svgX,
-      svgY: PADDING,
-      widthMeters: ceilWidthMeters,
-      heightMeters: ceilHeightMeters,
-      pxWidth: ceilPxW,
-      pxHeight: ceilPxH,
-    });
-  }
-
-  const totalSvgWidth =
-    Math.max(...surfaceRects.map((r) => r.svgX + r.pxWidth)) + PADDING;
-  const totalSvgHeight =
-    Math.max(...surfaceRects.map((r) => r.svgY + r.pxHeight)) + PADDING;
-
-  // Uniform bottom-up Y coordinate on both walls and ceiling:
-  // On walls, y = 0 is the floor (bottom edge) and y = height is the ceiling hinge (top edge).
-  // On ceiling (Strop), y = 0 is the bottom hinge edge touching the top of centerWall!
-  const toSvgCoords = (rect: SurfaceRect, xMeters: number, yMeters: number) => {
-    const clampedX = Math.max(0, Math.min(rect.widthMeters, xMeters));
-    const clampedY = Math.max(0, Math.min(rect.heightMeters, yMeters));
-    const pxX = rect.svgX + clampedX * SCALE;
-    const pxY = rect.svgY + (rect.heightMeters - clampedY) * SCALE;
-    return { pxX, pxY };
+  /** Position in a surface's drawn axes (origin bottom-left) to pixels. */
+  const viewToPx = (r: SurfaceRect, x: number, y: number) => {
+    const box = pxRect(r);
+    return { x: box.x + x * scale, y: box.y + (r.heightM - y) * scale };
   };
 
-  /**
-   * Offsets an orthogonal SVG polyline by `offsetPx` along each segment's normal
-   * so individual L, N, PE conductors remain strictly orthogonal at every 90° corner.
-   */
-  const buildOrthogonalOffsetPathD = (
-    svgPts: { pxX: number; pxY: number }[],
-    offsetPx: number
-  ): string => {
-    if (svgPts.length === 0) return '';
-    if (svgPts.length === 1 || Math.abs(offsetPx) < 0.05) {
-      return svgPts
-        .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.pxX} ${p.pxY}`)
-        .join(' ');
-    }
+  const storedToPx = (r: SurfaceRect, p: Point) =>
+    r.surface === 'ceiling'
+      ? (() => {
+          const v = ceilingToView(p, room, center);
+          return viewToPx(r, v.x, v.y);
+        })()
+      : viewToPx(r, p.x, p.y);
 
-    const shifted = svgPts.map((p) => ({ pxX: p.pxX, pxY: p.pxY }));
-    for (let i = 0; i < svgPts.length - 1; i++) {
-      const p1 = svgPts[i];
-      const p2 = svgPts[i + 1];
-      const isHorizontal = Math.abs(p2.pxX - p1.pxX) >= Math.abs(p2.pxY - p1.pxY);
-      if (isHorizontal) {
-        shifted[i].pxY += offsetPx;
-        shifted[i + 1].pxY += offsetPx;
-      } else {
-        shifted[i].pxX += offsetPx;
-        shifted[i + 1].pxX += offsetPx;
-      }
-    }
-
-    return shifted
-      .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.pxX} ${p.pxY}`)
-      .join(' ');
-  };
-
-  const pointerToSurfaceCoords = (
-    clientX: number,
-    clientY: number
-  ): { rect: SurfaceRect; x: number; y: number } | null => {
+  const pointerToStored = (clientX: number, clientY: number) => {
     const svg = svgRef.current;
     if (!svg) return null;
-    const pt = svg.createSVGPoint();
-    pt.x = clientX;
-    pt.y = clientY;
-    const ctm = svg.getScreenCTM();
-    if (!ctm) return null;
-    const transformed = pt.matrixTransform(ctm.inverse());
-
-    for (const rect of surfaceRects) {
+    const bounds = svg.getBoundingClientRect();
+    const px = clientX - bounds.left;
+    const py = clientY - bounds.top;
+    for (const r of rects) {
+      const box = pxRect(r);
       if (
-        transformed.x >= rect.svgX &&
-        transformed.x <= rect.svgX + rect.pxWidth &&
-        transformed.y >= rect.svgY &&
-        transformed.y <= rect.svgY + rect.pxHeight
+        px >= box.x &&
+        px <= box.x + box.width &&
+        py >= box.y &&
+        py <= box.y + box.height
       ) {
-        const rawX = (transformed.x - rect.svgX) / SCALE;
-        const rawY = rect.heightMeters - (transformed.y - rect.svgY) / SCALE;
-        return { rect, x: rawX, y: rawY };
+        const view = {
+          x: (px - box.x) / scale,
+          y: r.heightM - (py - box.y) / scale,
+        };
+        const stored =
+          r.surface === 'ceiling' ? viewToCeiling(view, room, center) : view;
+        return { surface: r.surface, ...stored };
       }
     }
     return null;
   };
 
-  const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
-    if (!draggingNodeId && !draggingPaletteCategory) {
-      return;
-    }
-    const hit = pointerToSurfaceCoords(e.clientX, e.clientY);
-    if (!hit) {
-      setHoverSnap(null);
-      return;
-    }
-
-    const snap = computeSnapAndDimensions(
-      hit.rect.surface,
-      hit.x,
-      hit.y,
-      room,
-      nodes,
-      openings,
-      draggingNodeId || undefined,
-      enableSnap
-    );
-
-    setHoverSnap({ surface: hit.rect.surface, snap });
-
-    if (draggingNodeId && !snap.collidingOpening) {
-      onUpdateNodePosition(draggingNodeId, hit.rect.surface, snap.x, snap.y);
-    }
-  };
-
-  const handlePointerUp = () => {
-    setDraggingNodeId(null);
-    setHoverSnap(null);
-  };
-
-  const handleDragOver = (e: React.DragEvent<SVGSVGElement>) => {
-    e.preventDefault();
-    const hit = pointerToSurfaceCoords(e.clientX, e.clientY);
-    if (!hit) {
-      setHoverSnap(null);
-      return;
-    }
-    const snap = computeSnapAndDimensions(
-      hit.rect.surface,
-      hit.x,
-      hit.y,
-      room,
-      nodes,
-      openings,
-      undefined,
-      enableSnap
-    );
-    setHoverSnap({ surface: hit.rect.surface, snap });
-  };
-
-  const handleDrop = (e: React.DragEvent<SVGSVGElement>) => {
-    e.preventDefault();
-    const cat =
-      (e.dataTransfer.getData('text/plain') as ElementCategory) ||
-      draggingPaletteCategory;
-    const hit = pointerToSurfaceCoords(e.clientX, e.clientY);
-    if (cat && hit) {
-      const snap = computeSnapAndDimensions(
-        hit.rect.surface,
+  const snapAt = (clientX: number, clientY: number, excludeId?: string) => {
+    const hit = pointerToStored(clientX, clientY);
+    if (!hit) return null;
+    return {
+      surface: hit.surface,
+      snap: computeSnapAndDimensions(
+        hit.surface,
         hit.x,
         hit.y,
         room,
         nodes,
         openings,
-        undefined,
-        enableSnap
-      );
-      if (!snap.collidingOpening) {
-        onDropNewNode(cat, hit.rect.surface, snap.x, snap.y);
-      }
-    }
-    setHoverSnap(null);
+        excludeId,
+        layers.snap
+      ),
+    };
   };
 
-  const ceilRect = surfaceRects.find((r) => r.surface === 'ceiling');
-  const rkWallRect = surfaceRects.find((r) => r.surface === junctionBoxWall);
-  const rectBySurface = new Map<SurfaceId, SurfaceRect>(
-    surfaceRects.map((r) => [r.surface, r])
+  useImperativeHandle(ref, () => ({
+    previewPaletteDrop: (x, y) => setSnapPreview(snapAt(x, y)),
+    clearPreview: () => setSnapPreview(null),
+    commitPaletteDrop: (category, x, y) => {
+      const result = snapAt(x, y);
+      setSnapPreview(null);
+      if (!result) return;
+      if (result.snap.collidingOpening) {
+        onBlockedDrop('Element ne može preko vrata ili prozora.');
+        return;
+      }
+      onDropNewNode(category, result.surface, result.snap.x, result.snap.y);
+    },
+  }));
+
+  const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!dragging) return;
+    const result = snapAt(e.clientX, e.clientY, dragging.id);
+    setSnapPreview(result);
+    if (result && !result.snap.collidingOpening) {
+      onMoveNode(dragging.id, result.surface, result.snap.x, result.snap.y, dragging.key);
+    }
+  };
+
+  const endDrag = () => {
+    setDragging(null);
+    setSnapPreview(null);
+  };
+
+  const visibleSegments = segments.filter(
+    (s) => circuitFilter === 'all' || s.circuitId === circuitFilter
   );
+  const visibleNodes = nodes.filter(
+    (n) => circuitFilter === 'all' || n.circuitId === circuitFilter
+  );
+  const colorOf = (id: string) => circuits.find((c) => c.id === id)?.color ?? INK;
+  const selected = nodes.find((n) => n.id === selectedNodeId) ?? null;
+  const dragActive = dragging !== null || snapPreview !== null;
 
-  // Build non-crossing horizontal & vertical inter-surface bridge lines
-  const interSurfaceBridges: {
-    id: string;
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-    color: string;
-    isFocused: boolean;
-  }[] = [];
-
-  if (layoutMode === 'strip_all') {
-    const filteredSegs = segments.filter(
-      (s) =>
-        activeCircuitFilter === 'all' || s.circuitId === activeCircuitFilter
-    );
-
-    // 1. Horizontal bridges between consecutive walls in the strip (-w1 -> -w2, -w2 -> -w3, -w3 -> -w4)
-    for (const sCurr of filteredSegs) {
-      const match = sCurr.id.match(/^(.*)-w(\d+)$/);
-      if (!match) continue;
-      const baseId = match[1];
-      const hopNum = parseInt(match[2], 10);
-      const sNext = filteredSegs.find((s) => s.id === `${baseId}-w${hopNum + 1}`);
-      if (!sNext) continue;
-
-      const r1 = rectBySurface.get(sCurr.surface);
-      const r2 = rectBySurface.get(sNext.surface);
-      if (!r1 || !r2) continue;
-
-      const cir = circuits.find((c) => c.id === sCurr.circuitId);
-      const color = cir?.color || '#38BDF8';
-      const isFocused =
-        activeFocusNodeId !== null &&
-        (sCurr.fromNodeId === activeFocusNodeId ||
-          sCurr.toNodeId === activeFocusNodeId);
-
-      const p1 = toSvgCoords(
-        r1,
-        sCurr.points[sCurr.points.length - 1].x,
-        sCurr.points[sCurr.points.length - 1].y
-      );
-      const p2 = toSvgCoords(r2, sNext.points[0].x, sNext.points[0].y);
-
-      interSurfaceBridges.push({
-        id: `bridge-${baseId}-${hopNum}`,
-        x1: p1.pxX,
-        y1: p1.pxY,
-        x2: p2.pxX,
-        y2: p2.pxY,
-        color,
-        isFocused,
+  // Label layout, one pass per surface, the selected element first.
+  const labels = new Map<string, { x: number; y: number; text: string; width: number }>();
+  for (const r of rects) {
+    const box = pxRect(r);
+    const onSurface = visibleNodes
+      .filter((n) => n.surface === r.surface)
+      .sort((a, b) => Number(b.id === selectedNodeId) - Number(a.id === selectedNodeId));
+    const obstacles: Box[] = openings
+      .filter((o) => o.wall === r.surface)
+      .flatMap((o) => {
+        const p = viewToPx(r, o.offsetFromLeft, o.sillHeight + o.height);
+        const w = o.width * scale;
+        const h = o.height * scale;
+        const label = layoutOpeningLabel(o, p.x, p.y, w, h, box);
+        return label.kind === 'outside'
+          ? ([[p.x, p.y, w, h], label.box] as Box[])
+          : ([[p.x, p.y, w, h]] as Box[]);
       });
+    if (selected?.surface === r.surface) {
+      const p = storedToPx(r, selected);
+      obstacles.push([p.x - 2, box.y, 4, box.height], [box.x, p.y - 2, p.x - box.x, 4]);
+      obstacles.push([p.x - 45, box.y + box.height - 18, 42, 15]);
+      obstacles.push([p.x - 21, (p.y + box.y) / 2 + 4, 42, 15]);
+      obstacles.push([(p.x + box.x) / 2 - 23, p.y - 19, 42, 15]);
     }
-
-    // 2. Continuous vertical bridges from Junction Box Wall up into Strop (seg-...-wall -> seg-...-ceiling)
-    const wallToCeilSegs = filteredSegs.filter(
-      (s) => s.id.endsWith('-wall') && s.surface === junctionBoxWall
-    );
-    for (const sWall of wallToCeilSegs) {
-      if (!rkWallRect || !ceilRect) continue;
-      const baseId = sWall.id.slice(0, -5);
-      const sCeil = filteredSegs.find((s) => s.id === `${baseId}-ceiling`);
-      const cir = circuits.find((c) => c.id === sWall.circuitId);
-      const color = cir?.color || '#A855F7';
-      const isFocused =
-        activeFocusNodeId !== null &&
-        (sWall.fromNodeId === activeFocusNodeId ||
-          sWall.toNodeId === activeFocusNodeId);
-
-      const topPt = toSvgCoords(
-        rkWallRect,
-        sWall.points[sWall.points.length - 1].x,
-        sWall.points[sWall.points.length - 1].y
-      );
-      const ceilEntryPt = sCeil
-        ? toSvgCoords(ceilRect, sCeil.points[0].x, sCeil.points[0].y)
-        : { pxX: topPt.pxX, pxY: ceilRect.svgY + ceilRect.pxHeight };
-
-      interSurfaceBridges.push({
-        id: `bridge-light-${sWall.id}`,
-        x1: topPt.pxX,
-        y1: topPt.pxY,
-        x2: ceilEntryPt.pxX,
-        y2: ceilEntryPt.pxY,
-        color,
-        isFocused,
-      });
-    }
+    const textOf = (n: ElectricalNode) => {
+      const base = n.label.split(' ')[0];
+      if (n.category !== 'junction_box') return base;
+      const fed = nodes.filter((d) => d.parentBoxId === n.id).length;
+      return fed > 0 ? `${base} ×${fed}` : base;
+    };
+    const requests = onSurface.map((n) => {
+      const p = storedToPx(r, n);
+      const footprint = ELEMENT_FOOTPRINT[n.category];
+      const text = textOf(n);
+      return {
+        id: n.id,
+        x: p.x,
+        y: p.y,
+        anchorWidth: footprint.width * scale,
+        anchorHeight: footprint.height * scale,
+        labelWidth: text.length * 6.7 + 8,
+        labelHeight: 15,
+        gap: n.id === selectedNodeId ? 12 : 5,
+        bounds: box,
+      };
+    });
+    placeLabels(requests, obstacles).forEach((pos, id) => {
+      const request = requests.find((q) => q.id === id)!;
+      const node = onSurface.find((n) => n.id === id)!;
+      labels.set(id, { ...pos, text: textOf(node), width: request.labelWidth });
+    });
   }
 
-  return (
-    <div className="relative w-full h-full flex flex-col overflow-hidden bg-[#0D1117] select-none">
-      {/* Subtle Zoom Pill in Bottom-Right Corner */}
-      <div className="absolute bottom-4 right-4 z-20 flex items-center gap-1 px-2.5 py-1 bg-[#161B22]/90 border border-slate-800 rounded-lg text-xs no-print">
-        <button
-          onClick={() => setZoomPercent((z) => Math.max(70, z - 15))}
-          className="p-1 text-slate-400 hover:text-white rounded"
-          title="Smanji"
-        >
-          <ZoomOut className="w-3.5 h-3.5" />
-        </button>
-        <button
-          onClick={() => setZoomPercent(115)}
-          className="px-1.5 font-mono text-[11px] text-slate-300 hover:text-white tabular-nums"
-          title="Resetiraj zum"
-        >
-          {zoomPercent}%
-        </button>
-        <button
-          onClick={() => setZoomPercent((z) => Math.min(200, z + 15))}
-          className="p-1 text-slate-400 hover:text-white rounded"
-          title="Povećaj"
-        >
-          <ZoomIn className="w-3.5 h-3.5" />
-        </button>
-      </div>
+  const barMeters = niceBarMeters(scale);
 
-      {/* Scrollable Clean Architectural Canvas */}
-      <div className="flex-1 overflow-auto p-4">
+  return (
+    <div className="relative w-full h-full bg-desk select-none" data-testid="nacrt">
+      <div
+        ref={scrollerRef}
+        className="absolute inset-0 overflow-auto flex"
+        onWheel={(e) => {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            setZoom((z) =>
+              Math.max(0.5, Math.min(8, e.deltaY < 0 ? z * 1.1 : z / 1.1))
+            );
+          }
+        }}
+      >
         <svg
           ref={svgRef}
-          width={totalSvgWidth}
-          height={totalSvgHeight}
-          viewBox={`0 0 ${totalSvgWidth} ${totalSvgHeight}`}
-          className="block mx-auto"
+          width={svgWidth}
+          height={svgHeight}
+          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+          className="block m-auto bg-paper shrink-0"
+          style={{ overflow: 'visible', touchAction: canDrag && dragging ? 'none' : undefined }}
+          data-scale={scale}
           onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
         >
-          <defs>
-            <pattern
-              id="clean-grid-major"
-              width={SCALE}
-              height={SCALE}
-              patternUnits="userSpaceOnUse"
-            >
-              <path
-                d={`M ${SCALE} 0 L 0 0 0 ${SCALE}`}
-                fill="none"
-                stroke="#1E2633"
-                strokeWidth="1"
-              />
-            </pattern>
-          </defs>
-
-          {/* Subtle connector between Strop and the Wall with the Razvodna kutija */}
-          {layoutMode === 'strip_all' && ceilRect && rkWallRect && (
-            <g pointerEvents="none">
-              <line
-                x1={ceilRect.svgX}
-                y1={ceilRect.svgY + ceilRect.pxHeight}
-                x2={rkWallRect.svgX}
-                y2={rkWallRect.svgY}
-                stroke="#334155"
-                strokeWidth="1"
-                strokeDasharray="3 3"
-              />
-              <line
-                x1={ceilRect.svgX + ceilRect.pxWidth}
-                y1={ceilRect.svgY + ceilRect.pxHeight}
-                x2={rkWallRect.svgX + rkWallRect.pxWidth}
-                y2={rkWallRect.svgY}
-                stroke="#334155"
-                strokeWidth="1"
-                strokeDasharray="3 3"
-              />
-            </g>
-          )}
-
-          {/* Parallel Inter-Wall & Wall-to-Ceiling Conduit Bridges */}
-          {interSurfaceBridges.length > 0 && (
-            <g pointerEvents="none">
-              {interSurfaceBridges.map((b) => (
-                <line
-                  key={b.id}
-                  x1={b.x1}
-                  y1={b.y1}
-                  x2={b.x2}
-                  y2={b.y2}
-                  stroke={b.color}
-                  strokeOpacity={
-                    activeFocusNodeId || hoveredSegmentId
-                      ? b.isFocused
-                        ? 0.95
-                        : 0.25
-                      : 0.65
-                  }
-                  strokeWidth={b.isFocused ? 2.2 : 1.7}
-                  strokeDasharray="4 3"
-                />
-              ))}
-            </g>
-          )}
-
-          {/* Render Each Surface (Ceiling + 4 Walls in a Row) */}
-          {surfaceRects.map((rect) => {
-            const isCurrentSurface = rect.surface === activeSurface;
-            const surfaceOpenings =
-              rect.surface === 'ceiling'
-                ? []
-                : openings.filter((o) => o.wall === rect.surface);
-            const surfaceSegments = segments.filter(
-              (s) =>
-                s.surface === rect.surface &&
-                (activeCircuitFilter === 'all' ||
-                  s.circuitId === activeCircuitFilter)
-            );
-            const surfaceNodes = nodes.filter(
-              (n) =>
-                n.surface === rect.surface &&
-                (activeCircuitFilter === 'all' ||
-                  n.circuitId === activeCircuitFilter)
-            );
-
-            const activeSnapOnSurface =
-              hoverSnap?.surface === rect.surface ? hoverSnap.snap : null;
-
-            const inspectedNode =
-              !activeSnapOnSurface && selectedNode?.surface === rect.surface
-                ? selectedNode
-                : null;
-
+          {rects.map((r) => {
+            const box = pxRect(r);
+            const isActive = r.surface === activeSurface;
             return (
-              <g key={rect.surface}>
-                {/* Minimal Surface Header */}
-                <g
-                  className="cursor-pointer"
-                  onClick={() => onSelectSurface(rect.surface)}
-                >
-                  <text
-                    x={rect.svgX}
-                    y={rect.svgY - 10}
-                    fill={isCurrentSurface ? '#F8FAFC' : '#94A3B8'}
-                    fontSize="12"
-                    fontWeight="600"
-                    fontFamily="Plus Jakarta Sans, sans-serif"
-                  >
-                    {rect.title}
-                  </text>
-                  <text
-                    x={rect.svgX + rect.pxWidth}
-                    y={rect.svgY - 10}
-                    textAnchor="end"
-                    fill="#64748B"
-                    fontSize="11"
-                    fontFamily="JetBrains Mono, monospace"
-                  >
-                    {rect.subtitle}
-                  </text>
-                </g>
-
-                {/* Surface Background & Calm 1m Grid */}
+              <g key={`base-${r.surface}`}>
                 <rect
-                  x={rect.svgX}
-                  y={rect.svgY}
-                  width={rect.pxWidth}
-                  height={rect.pxHeight}
-                  fill="#131922"
+                  x={box.x}
+                  y={box.y}
+                  width={box.width}
+                  height={box.height}
+                  fill="#FFFFFF"
                   onClick={() => {
-                    onSelectSurface(rect.surface);
+                    onSelectSurface(r.surface);
                     onSelectNode(null);
                   }}
                 />
-                <rect
-                  x={rect.svgX}
-                  y={rect.svgY}
-                  width={rect.pxWidth}
-                  height={rect.pxHeight}
-                  fill="url(#clean-grid-major)"
-                  pointerEvents="none"
-                />
-                <rect
-                  x={rect.svgX}
-                  y={rect.svgY}
-                  width={rect.pxWidth}
-                  height={rect.pxHeight}
-                  fill="none"
-                  stroke={isCurrentSurface ? '#64748B' : '#263040'}
-                  strokeWidth={isCurrentSurface ? 1.8 : 1}
-                  pointerEvents="none"
-                />
-
-                {/* Subtle Installation Zone Hairlines (Only when dragging or toggled) */}
-                {(showInstallZones || draggingNodeId || draggingPaletteCategory) &&
-                  rect.surface !== 'ceiling' && (
-                    <g pointerEvents="none">
-                      <line
-                        x1={rect.svgX}
-                        y1={rect.svgY + 0.3 * SCALE}
-                        x2={rect.svgX + rect.pxWidth}
-                        y2={rect.svgY + 0.3 * SCALE}
-                        stroke="#1E3A5F"
-                        strokeWidth="1"
-                        strokeDasharray="4 4"
-                      />
-                      <line
-                        x1={rect.svgX}
-                        y1={rect.svgY + (rect.heightMeters - 0.3) * SCALE}
-                        x2={rect.svgX + rect.pxWidth}
-                        y2={rect.svgY + (rect.heightMeters - 0.3) * SCALE}
-                        stroke="#1E3A5F"
-                        strokeWidth="1"
-                        strokeDasharray="4 4"
-                      />
-                    </g>
-                  )}
-
-                {/* Doors & Windows — Clean Architectural Outline */}
-                {surfaceOpenings.map((op) => {
-                  const topLeft = toSvgCoords(
-                    rect,
-                    op.offsetFromLeft,
-                    op.sillHeight + op.height
-                  );
-                  const wPx = op.width * SCALE;
-                  const hPx = op.height * SCALE;
-                  const isColliding =
-                    activeSnapOnSurface?.collidingOpening?.id === op.id;
-
-                  return (
-                    <g key={op.id} pointerEvents="none">
-                      <rect
-                        x={topLeft.pxX}
-                        y={topLeft.pxY}
-                        width={wPx}
-                        height={hPx}
-                        fill={
-                          isColliding
-                            ? 'rgba(239, 68, 68, 0.25)'
-                            : '#0D1117'
-                        }
-                        stroke={isColliding ? '#EF4444' : '#334155'}
-                        strokeWidth={isColliding ? 2 : 1.2}
-                      />
-                      <text
-                        x={topLeft.pxX + wPx / 2}
-                        y={topLeft.pxY + hPx / 2 + 3}
-                        textAnchor="middle"
-                        fill="#64748B"
-                        fontSize="10"
-                        fontFamily="Plus Jakarta Sans, sans-serif"
-                      >
-                        {op.label} ({op.width}×{op.height}m)
-                      </text>
-                    </g>
-                  );
-                })}
-
-                {/* Routed Parallel Conduits & Smart Progressive Wire Display */}
-                {surfaceSegments.map((seg) => {
-                  const cir = circuits.find((c) => c.id === seg.circuitId);
-                  const cColor = cir?.color || '#38BDF8';
-                  const svgPts = seg.points.map((p) => toSvgCoords(rect, p.x, p.y));
-
-                  const isFocused =
-                    hoveredSegmentId === seg.id ||
-                    (activeFocusNodeId !== null &&
-                      (seg.fromNodeId === activeFocusNodeId ||
-                        seg.toNodeId === activeFocusNodeId));
-
-                  let bestMidX = 0;
-                  let bestMidY = 0;
-                  let maxSegPx = 0;
-                  for (let i = 1; i < svgPts.length; i++) {
-                    const d = Math.hypot(
-                      svgPts[i].pxX - svgPts[i - 1].pxX,
-                      svgPts[i].pxY - svgPts[i - 1].pxY
-                    );
-                    if (d > maxSegPx) {
-                      maxSegPx = d;
-                      bestMidX = (svgPts[i].pxX + svgPts[i - 1].pxX) / 2;
-                      bestMidY = (svgPts[i].pxY + svgPts[i - 1].pxY) / 2;
-                    }
-                  }
-
-                  const pathD = buildOrthogonalOffsetPathD(svgPts, 0);
-
-                  // KISS Principle: Each conduit is rendered as its own parallel line in its track;
-                  // Individual L, N, PE conductors expand when hovered/selected or when showWireConductors is on.
-                  const expandWiresHere = showWireConductors || isFocused;
-
-                  if (!expandWiresHere) {
-                    return (
-                      <g
-                        key={seg.id}
-                        className="cursor-pointer"
-                        onPointerEnter={() => setHoveredSegmentId(seg.id)}
-                        onPointerLeave={() => setHoveredSegmentId(null)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelectNode(seg.toNodeId);
-                        }}
-                      >
-                        {/* Invisible wider hit-area so user can easily hover any parallel conduit line */}
-                        <path
-                          d={pathD}
-                          fill="none"
-                          stroke="transparent"
-                          strokeWidth="7"
-                        />
-                        <path
-                          d={pathD}
-                          fill="none"
-                          stroke={cColor}
-                          strokeOpacity={
-                            activeFocusNodeId || hoveredSegmentId
-                              ? 0.35
-                              : seg.isMainFeeder
-                              ? 0.95
-                              : 0.8
-                          }
-                          strokeWidth={seg.isMainFeeder ? 2.7 : 1.9}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </g>
-                    );
-                  }
-
-                  const count = seg.conductors.length;
-                  const spacing = isFocused ? 2.8 : 2.0;
-                  return (
-                    <g
-                      key={seg.id}
-                      className="cursor-pointer"
-                      onPointerEnter={() => setHoveredSegmentId(seg.id)}
-                      onPointerLeave={() => setHoveredSegmentId(null)}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectNode(seg.toNodeId);
-                      }}
-                      opacity={
-                        (activeFocusNodeId || hoveredSegmentId) && !isFocused
-                          ? 0.35
-                          : 1
-                      }
-                    >
-                      <path
-                        d={pathD}
-                        fill="none"
-                        stroke="transparent"
-                        strokeWidth="10"
-                      />
-                      {seg.conductors.map((cond, cIdx) => {
-                        const offsetPx = (cIdx - (count - 1) / 2) * spacing;
-                        const meta = CONDUCTOR_META[cond];
-                        const strokeColor = meta?.colorHex || '#F8FAFC';
-                        const isPE = cond === 'PE';
-                        const d = buildOrthogonalOffsetPathD(svgPts, offsetPx);
-
-                        return (
-                          <path
-                            key={`${seg.id}-${cond}-${cIdx}`}
-                            d={d}
-                            fill="none"
-                            stroke={strokeColor}
-                            strokeWidth={isFocused ? 1.9 : 1.3}
-                            strokeDasharray={isPE ? '4 2' : undefined}
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        );
-                      })}
-
-                      {/* Show conduit & wire spec badge ONLY on the focused segment */}
-                      {isFocused && maxSegPx > 55 && (
-                        <g
-                          transform={`translate(${bestMidX}, ${bestMidY})`}
-                          pointerEvents="none"
-                        >
-                          <rect
-                            x={seg.isMainFeeder ? -86 : -64}
-                            y="-10"
-                            width={seg.isMainFeeder ? 172 : 128}
-                            height="20"
-                            rx="4"
-                            fill="#0D1117"
-                            stroke={seg.isMainFeeder ? '#F59E0B' : '#475569'}
-                            strokeWidth="1"
-                          />
-                          <text
-                            x="0"
-                            y="3.5"
-                            textAnchor="middle"
-                            fill="#E2E8F0"
-                            fontSize="9"
-                            fontFamily="JetBrains Mono, monospace"
-                          >
-                            {seg.isMainFeeder
-                              ? `GLAVNI VOD (${seg.fedDevicesCount || 0} ur.) · `
-                              : ''}
-                            {seg.conductors
-                              .map((c) => CONDUCTOR_META[c]?.short || c)
-                              .join('·')}{' '}
-                            · Ø{seg.conduitDiameterMm} ({seg.lengthMeters}m)
-                          </text>
-                        </g>
-                      )}
-                    </g>
-                  );
-                })}
-
-                {/* Subtle Snap Alignment Guides (Only while actively dragging) */}
-                {activeSnapOnSurface && (
-                  <g pointerEvents="none">
-                    {activeSnapOnSurface.snappedXNodeId && (
-                      <line
-                        x1={toSvgCoords(rect, activeSnapOnSurface.x, 0).pxX}
-                        y1={rect.svgY}
-                        x2={toSvgCoords(rect, activeSnapOnSurface.x, 0).pxX}
-                        y2={rect.svgY + rect.pxHeight}
-                        stroke="#38BDF8"
-                        strokeWidth="1.2"
-                        strokeDasharray="4 4"
-                      />
-                    )}
-                    {(activeSnapOnSurface.snappedYNodeId ||
-                      activeSnapOnSurface.snappedStandardHeight !== undefined) && (
-                      <line
-                        x1={rect.svgX}
-                        y1={toSvgCoords(rect, 0, activeSnapOnSurface.y).pxY}
-                        x2={rect.svgX + rect.pxWidth}
-                        y2={toSvgCoords(rect, 0, activeSnapOnSurface.y).pxY}
-                        stroke="#38BDF8"
-                        strokeWidth="1.2"
-                        strokeDasharray="4 4"
-                      />
-                    )}
+                {Array.from({ length: Math.ceil(r.widthM) - 1 }, (_, i) => i + 1).map((m) => (
+                  <line
+                    key={`v${m}`}
+                    x1={box.x + m * scale}
+                    y1={box.y}
+                    x2={box.x + m * scale}
+                    y2={box.y + box.height}
+                    stroke={GRID}
+                    pointerEvents="none"
+                  />
+                ))}
+                {Array.from({ length: Math.ceil(r.heightM) - 1 }, (_, i) => i + 1).map((m) => (
+                  <line
+                    key={`h${m}`}
+                    x1={box.x}
+                    y1={box.y + box.height - m * scale}
+                    x2={box.x + box.width}
+                    y2={box.y + box.height - m * scale}
+                    stroke={GRID}
+                    pointerEvents="none"
+                  />
+                ))}
+                {(layers.zones || dragActive) && r.surface !== 'ceiling' && (
+                  <g stroke={INK} strokeDasharray="4 4" pointerEvents="none">
+                    <line x1={box.x} x2={box.x + box.width} y1={box.y + 0.3 * scale} y2={box.y + 0.3 * scale} />
+                    <line
+                      x1={box.x}
+                      x2={box.x + box.width}
+                      y1={box.y + box.height - 0.3 * scale}
+                      y2={box.y + box.height - 0.3 * scale}
+                    />
                   </g>
                 )}
-
-                {/* Contextual Kote od Poda i Stropa (Only for selected/dragged node or when showAllDimensions is on) */}
-                {(activeSnapOnSurface || inspectedNode || showAllDimensions) &&
-                  surfaceNodes
-                    .filter(
-                      (n) =>
-                        showAllDimensions ||
-                        n.id === draggingNodeId ||
-                        n.id === inspectedNode?.id
-                    )
-                    .map((dimNode) => {
-                      const pt = toSvgCoords(rect, dimNode.x, dimNode.y);
-                      const floorY = rect.svgY + rect.pxHeight;
-                      const ceilY = rect.svgY;
-                      const kotaPoda = dimNode.y;
-                      const kotaStropa = Number(
-                        (rect.heightMeters - dimNode.y).toFixed(2)
-                      );
-
-                      return (
-                        <g key={`dim-${dimNode.id}`} pointerEvents="none">
-                          {/* Line to Floor */}
-                          <line
-                            x1={pt.pxX}
-                            y1={pt.pxY + 15}
-                            x2={pt.pxX}
-                            y2={floorY}
-                            stroke="#64748B"
-                            strokeWidth="1"
-                            strokeDasharray="3 3"
-                          />
-                          <text
-                            x={pt.pxX + 6}
-                            y={(pt.pxY + floorY) / 2 + 3}
-                            fill="#94A3B8"
-                            fontSize="9.5"
-                            fontFamily="JetBrains Mono, monospace"
-                          >
-                            ↓{kotaPoda.toFixed(2)}m
-                          </text>
-
-                          {/* Line to Ceiling */}
-                          <line
-                            x1={pt.pxX}
-                            y1={ceilY}
-                            x2={pt.pxX}
-                            y2={pt.pxY - 15}
-                            stroke="#64748B"
-                            strokeWidth="1"
-                            strokeDasharray="3 3"
-                          />
-                          <text
-                            x={pt.pxX + 6}
-                            y={(pt.pxY + ceilY) / 2 + 3}
-                            fill="#94A3B8"
-                            fontSize="9.5"
-                            fontFamily="JetBrains Mono, monospace"
-                          >
-                            ↑{kotaStropa.toFixed(2)}m
-                          </text>
-
-                          {/* Horizontal distance from left corner */}
-                          {(dimNode.id === draggingNodeId ||
-                            dimNode.id === inspectedNode?.id) && (
-                            <>
-                              <line
-                                x1={rect.svgX}
-                                y1={pt.pxY}
-                                x2={pt.pxX - 15}
-                                y2={pt.pxY}
-                                stroke="#64748B"
-                                strokeWidth="1"
-                                strokeDasharray="3 3"
-                              />
-                              <text
-                                x={(rect.svgX + pt.pxX) / 2}
-                                y={pt.pxY - 6}
-                                textAnchor="middle"
-                                fill="#94A3B8"
-                                fontSize="9.5"
-                                fontFamily="JetBrains Mono, monospace"
-                              >
-                                ↔{dimNode.x.toFixed(2)}m
-                              </text>
-                            </>
-                          )}
-                        </g>
-                      );
-                    })}
-
-                {/* Electrical Elements (Clean, Calm Nodes) */}
-                {surfaceNodes.map((node) => {
-                  const { pxX, pxY } = toSvgCoords(rect, node.x, node.y);
-                  const cir = circuits.find((c) => c.id === node.circuitId);
-                  const cColor = cir?.color || '#38BDF8';
-                  const meta = ELEMENT_CATALOG[node.category];
-                  const isSelected = node.id === selectedNodeId;
-                  const isHovered = node.id === hoveredNodeId;
-                  const connectedApps = appliances.filter(
-                    (a) => a.assignedNodeId === node.id
-                  );
-                  const fedByThisBoxCount =
-                    node.category === 'junction_box'
-                      ? segments.find(
-                          (s) => s.toNodeId === node.id && s.isMainFeeder
-                        )?.fedDevicesCount ||
-                        nodes.filter((n) => n.parentBoxId === node.id).length
-                      : 0;
-
-                  return (
-                    <g
-                      key={node.id}
-                      transform={`translate(${pxX}, ${pxY})`}
-                      className="cursor-move"
-                      onPointerEnter={() => setHoveredNodeId(node.id)}
-                      onPointerLeave={() => setHoveredNodeId(null)}
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        onSelectSurface(rect.surface);
-                        onSelectNode(node.id);
-                        setDraggingNodeId(node.id);
-                      }}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        onInspectWiring(node.id);
-                      }}
-                    >
-                      {isSelected && (
-                        <circle
-                          r={node.category === 'distribution_board' ? 24 : 19}
-                          fill="rgba(56, 189, 248, 0.12)"
-                          stroke="#38BDF8"
-                          strokeWidth="1.5"
-                        />
-                      )}
-
-                      {node.category === 'distribution_board' ? (
-                        <g>
-                          {/* Incoming Main Supply Line (Dolazni glavni vod iz gornjeg lijevog kuta) */}
-                          <path
-                            d={`M ${rect.svgX - pxX} ${rect.svgY - pxY + 10} L -19 ${
-                              rect.svgY - pxY + 10
-                            } L -19 0`}
-                            fill="none"
-                            stroke="#F59E0B"
-                            strokeWidth="2.6"
-                            strokeDasharray="5 3"
-                          />
-                          <text
-                            x="-16"
-                            y={Math.max(-36, rect.svgY - pxY + 6)}
-                            fill="#FBBF24"
-                            fontSize="8.5"
-                            fontWeight="700"
-                            fontFamily="JetBrains Mono, monospace"
-                          >
-                            ⚡ DOLAZNI VOD
-                          </text>
-                          <rect
-                            x="-19"
-                            y="-15"
-                            width="38"
-                            height="30"
-                            rx="4"
-                            fill="#0F172A"
-                            stroke={isSelected ? '#38BDF8' : '#F59E0B'}
-                            strokeWidth={isSelected ? 2.4 : 2.0}
-                          />
-                          {/* Inner DIN breaker rail visual */}
-                          <line
-                            x1="-14"
-                            y1="-6"
-                            x2="14"
-                            y2="-6"
-                            stroke="#F59E0B"
-                            strokeOpacity="0.45"
-                            strokeWidth="1.5"
-                          />
-                        </g>
-                      ) : node.category === 'junction_box' ? (
-                        <rect
-                          x="-13"
-                          y="-13"
-                          width="26"
-                          height="26"
-                          rx="5"
-                          fill="#161B22"
-                          stroke={isSelected ? '#38BDF8' : cColor}
-                          strokeWidth={isSelected ? 2.2 : 1.8}
-                        />
-                      ) : node.category === 'socket_double' ? (
-                        <rect
-                          x="-15"
-                          y="-12"
-                          width="30"
-                          height="24"
-                          rx="6"
-                          fill="#161B22"
-                          stroke={isSelected ? '#38BDF8' : cColor}
-                          strokeWidth={isSelected ? 2.2 : 1.6}
-                        />
-                      ) : (
-                        <circle
-                          r="13"
-                          fill="#161B22"
-                          stroke={isSelected ? '#38BDF8' : cColor}
-                          strokeWidth={isSelected ? 2.2 : 1.6}
-                        />
-                      )}
-
-                      <text
-                        x="0"
-                        y={node.category === 'distribution_board' ? '5' : '3.5'}
-                        textAnchor="middle"
-                        fill={
-                          node.category === 'distribution_board'
-                            ? '#FBBF24'
-                            : '#F1F5F9'
-                        }
-                        fontSize="9.5"
-                        fontWeight="700"
-                        fontFamily="JetBrains Mono, monospace"
-                      >
-                        {meta?.shortCode || 'EL'}
-                      </text>
-
-                      {/* Small badge on RK showing how many devices share its main feeder */}
-                      {node.category === 'junction_box' && fedByThisBoxCount > 0 && (
-                        <g transform="translate(12, -12)">
-                          <rect
-                            x="-9"
-                            y="-7"
-                            width="18"
-                            height="13"
-                            rx="3.5"
-                            fill="#0D1117"
-                            stroke={cColor}
-                            strokeWidth="1"
-                          />
-                          <text
-                            x="0"
-                            y="2.5"
-                            textAnchor="middle"
-                            fill="#E2E8F0"
-                            fontSize="8"
-                            fontWeight="700"
-                            fontFamily="JetBrains Mono, monospace"
-                          >
-                            ×{fedByThisBoxCount}
-                          </text>
-                        </g>
-                      )}
-
-                      {/* Small, quiet code underneath; full details only when selected/hovered */}
-                      <text
-                        x="0"
-                        y={node.category === 'distribution_board' ? '27' : '24'}
-                        textAnchor="middle"
-                        fill={isSelected || isHovered ? '#F8FAFC' : '#64748B'}
-                        fontSize="9.5"
-                        fontWeight={isSelected ? '600' : '500'}
-                        fontFamily="Plus Jakarta Sans, sans-serif"
-                      >
-                        {node.label.split(' ')[0]}
-                        {connectedApps.length > 0 ? ' •' : ''}
-                      </text>
-                    </g>
-                  );
-                })}
+                {r.surface === 'ceiling' ? (
+                  <text
+                    x={box.x + 8}
+                    y={box.y + 18}
+                    fontSize="12.5"
+                    fontWeight={isActive ? 800 : 700}
+                    fill={INK}
+                    pointerEvents="none"
+                  >
+                    {box.width < r.caption.length * 6.6 ? r.caption.split(' · ')[0] : r.caption}
+                  </text>
+                ) : (
+                  <text
+                    x={box.x + box.width / 2}
+                    y={box.y + box.height + 18}
+                    textAnchor="middle"
+                    fontSize="12.5"
+                    fontWeight={isActive ? 800 : 700}
+                    textDecoration={isActive ? 'underline' : undefined}
+                    fill={INK}
+                    className="cursor-pointer"
+                    onClick={() => onSelectSurface(r.surface)}
+                  >
+                    {box.width < r.caption.length * 6.6 ? r.caption.split(' · ')[0] : r.caption}
+                  </text>
+                )}
               </g>
             );
           })}
+
+          {openings
+            .filter((o) => rectOf(o.wall))
+            .map((op) => {
+              const r = rectOf(op.wall)!;
+              const p = viewToPx(r, op.offsetFromLeft, op.sillHeight + op.height);
+              const w = op.width * scale;
+              const h = op.height * scale;
+              const colliding = snapPreview?.snap.collidingOpening?.id === op.id;
+              const label = layoutOpeningLabel(op, p.x, p.y, w, h, pxRect(r));
+              return (
+                <g key={op.id} pointerEvents="none">
+                  <rect
+                    x={p.x}
+                    y={p.y}
+                    width={w}
+                    height={h}
+                    fill={colliding ? '#F9DEDC' : OPENING}
+                    stroke={colliding ? ERROR : OPENING_LINE}
+                    strokeWidth={colliding ? 2.5 : 1.5}
+                  />
+                  {label.kind === 'inside' && (
+                    <text
+                      x={p.x + w / 2}
+                      y={p.y + h / 2 + 4 - ((label.lines.length - 1) * 13) / 2}
+                      textAnchor="middle"
+                      fontSize="11"
+                      fill={INK}
+                    >
+                      {label.lines.map((line, i) => (
+                        <tspan key={line} x={p.x + w / 2} dy={i === 0 ? 0 : 13}>
+                          {line}
+                        </tspan>
+                      ))}
+                    </text>
+                  )}
+                  {label.kind === 'rotated' && (
+                    <text
+                      transform={`translate(${p.x + w / 2 + 4},${p.y + h / 2}) rotate(-90)`}
+                      textAnchor="middle"
+                      fontSize="11"
+                      fill={INK}
+                    >
+                      {label.text}
+                    </text>
+                  )}
+                  {label.kind === 'outside' && (
+                    <text
+                      x={label.x}
+                      y={label.y}
+                      fontSize="11"
+                      fill={INK}
+                      stroke="#FFFFFF"
+                      strokeWidth="3"
+                      paintOrder="stroke"
+                    >
+                      {label.lines.map((line, i) => (
+                        <tspan key={line} x={label.x} dy={i === 0 ? 0 : 13}>
+                          {line}
+                        </tspan>
+                      ))}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+
+          {visibleSegments
+            .filter((s) => rectOf(s.surface))
+            .map((seg) => {
+              const r = rectOf(seg.surface)!;
+              const pts = seg.points.map((p) => storedToPx(r, p));
+              const focused =
+                selectedNodeId !== null &&
+                (seg.fromNodeId === selectedNodeId || seg.toNodeId === selectedNodeId);
+              const dimmed = selectedNodeId !== null && !focused;
+              const d = offsetPath(pts, 0);
+              const color = colorOf(seg.circuitId);
+              return (
+                <g
+                  key={seg.id}
+                  className="cursor-pointer"
+                  opacity={dimmed ? 0.4 : 1}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectNode(seg.toNodeId);
+                  }}
+                >
+                  <path d={d} fill="none" stroke="transparent" strokeWidth="10" />
+                  {layers.wires || focused ? (
+                    seg.conductors.map((c, i) => (
+                      <path
+                        key={`${c}-${i}`}
+                        d={offsetPath(pts, (i - (seg.conductors.length - 1) / 2) * 2.4)}
+                        fill="none"
+                        stroke={CONDUCTOR_META[c]?.colorHex ?? INK}
+                        strokeWidth="1.5"
+                        strokeDasharray={c === 'PE' ? '4 2' : undefined}
+                      />
+                    ))
+                  ) : (
+                    <path d={d} fill="none" stroke={color} strokeWidth={seg.isMainFeeder ? 2.4 : 1.5} />
+                  )}
+                </g>
+              );
+            })}
+
+          {rects.map((r) => {
+            const box = pxRect(r);
+            return (
+              <rect
+                key={`edge-${r.surface}`}
+                x={box.x}
+                y={box.y}
+                width={box.width}
+                height={box.height}
+                fill="none"
+                stroke={WALL}
+                strokeWidth="2"
+                pointerEvents="none"
+              />
+            );
+          })}
+
+          {snapPreview && rectOf(snapPreview.surface) && (() => {
+            const r = rectOf(snapPreview.surface)!;
+            const size = getSurfaceSize(snapPreview.surface, room);
+            const { snap } = snapPreview;
+            const a = storedToPx(r, { x: snap.x, y: 0 });
+            const b = storedToPx(r, { x: snap.x, y: size.height });
+            const c = storedToPx(r, { x: 0, y: snap.y });
+            const d = storedToPx(r, { x: size.width, y: snap.y });
+            const showY = snap.snappedYNodeId || snap.snappedStandardHeight !== undefined;
+            return (
+              <g stroke={SELECT} strokeWidth="1.2" strokeDasharray="4 4" pointerEvents="none">
+                {(snap.snappedXNodeId || !showY) && <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} />}
+                {(showY || !snap.snappedXNodeId) && <line x1={c.x} y1={c.y} x2={d.x} y2={d.y} />}
+              </g>
+            );
+          })()}
+
+          {layers.dimensions &&
+            visibleNodes
+              .filter((n) => n.surface !== 'ceiling' && n.id !== selectedNodeId && rectOf(n.surface))
+              .map((n) => {
+                const r = rectOf(n.surface)!;
+                const p = storedToPx(r, n);
+                const floor = pxRect(r).y + pxRect(r).height;
+                return (
+                  <g key={`dim-${n.id}`} pointerEvents="none">
+                    <line x1={p.x} y1={p.y} x2={p.x} y2={floor} stroke={INK} strokeDasharray="2 3" />
+                    <text x={p.x + 3} y={floor - 3} fontSize="10.5" fill={INK}>
+                      {formatMeters(n.y)}
+                    </text>
+                  </g>
+                );
+              })}
+
+          {visibleNodes
+            .filter((n) => rectOf(n.surface))
+            .map((node) => {
+              const r = rectOf(node.surface)!;
+              const p = storedToPx(r, node);
+              const footprint = ELEMENT_FOOTPRINT[node.category];
+              const w = footprint.width * scale;
+              const h = footprint.height * scale;
+              const outside = isNodeOutsideSurface(node, room);
+              const color = outside ? ERROR : colorOf(node.circuitId);
+              const hollow = node.category === 'light_ceiling';
+              return (
+                <g
+                  key={node.id}
+                  data-testid={`element-${node.label.split(' ')[0]}`}
+                  className={canDrag ? 'cursor-move' : 'cursor-pointer'}
+                  style={{ touchAction: canDrag ? 'none' : undefined }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    onSelectSurface(node.surface);
+                    onSelectNode(node.id);
+                    if (canDrag) {
+                      dragCounter.current += 1;
+                      setDragging({ id: node.id, key: `drag-${dragCounter.current}` });
+                      svgRef.current?.setPointerCapture(e.pointerId);
+                    }
+                  }}
+                >
+                  <circle cx={p.x} cy={p.y} r={14} fill="transparent" />
+                  {footprint.shape === 'rect' ? (
+                    <rect x={p.x - w / 2} y={p.y - h / 2} width={w} height={h} fill={color} />
+                  ) : (
+                    <circle
+                      cx={p.x}
+                      cy={p.y}
+                      r={w / 2}
+                      fill={hollow ? 'none' : color}
+                      stroke={color}
+                      strokeWidth="1.5"
+                    />
+                  )}
+                  {hollow && (
+                    <path
+                      d={`M${p.x - w * 0.35} ${p.y - w * 0.35}L${p.x + w * 0.35} ${p.y + w * 0.35}M${p.x + w * 0.35} ${p.y - w * 0.35}L${p.x - w * 0.35} ${p.y + w * 0.35}`}
+                      stroke={color}
+                      strokeWidth="1.5"
+                    />
+                  )}
+                </g>
+              );
+            })}
+
+          {visibleNodes
+            .filter((n) => labels.has(n.id) && (scale >= 22 || n.id === selectedNodeId))
+            .map((node) => {
+              const pos = labels.get(node.id)!;
+              const isSelected = node.id === selectedNodeId;
+              const outside = isNodeOutsideSurface(node, room);
+              return (
+                <g
+                  key={`label-${node.id}`}
+                  className="cursor-pointer"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    onSelectSurface(node.surface);
+                    onSelectNode(node.id);
+                  }}
+                >
+                  <rect
+                    x={pos.x}
+                    y={pos.y}
+                    width={pos.width}
+                    height={15}
+                    rx={2}
+                    fill={isSelected ? SELECT : outside ? ERROR : colorOf(node.circuitId)}
+                  />
+                  <text
+                    x={pos.x + pos.width / 2}
+                    y={pos.y + 11.3}
+                    textAnchor="middle"
+                    fontSize="11"
+                    fontWeight="700"
+                    fill="#FFFFFF"
+                  >
+                    {pos.text}
+                  </text>
+                </g>
+              );
+            })}
+
+          {selected && rectOf(selected.surface) && (() => {
+            const r = rectOf(selected.surface)!;
+            const box = pxRect(r);
+            const p = storedToPx(r, selected);
+            const tag = (x: number, y: number, text: string) => (
+              <g>
+                <rect x={x - 22} y={y - 8} width={44} height={15} fill="#FFFFFF" />
+                <text x={x} y={y + 4} textAnchor="middle" fontSize="11.5" fontWeight="700" fill={SELECT}>
+                  {text}
+                </text>
+              </g>
+            );
+            if (selected.surface === 'ceiling') {
+              const toWest = storedToPx(r, { x: 0, y: selected.y });
+              const toSouth = storedToPx(r, { x: selected.x, y: 0 });
+              return (
+                <g pointerEvents="none">
+                  <circle cx={p.x} cy={p.y} r={10} fill="none" stroke={SELECT} strokeWidth="2.2" />
+                  <g stroke={SELECT} strokeWidth="1.5">
+                    <line x1={p.x} y1={p.y} x2={toWest.x} y2={toWest.y} />
+                    <line x1={p.x} y1={p.y} x2={toSouth.x} y2={toSouth.y} />
+                  </g>
+                  {tag((p.x + toWest.x) / 2, (p.y + toWest.y) / 2 - 9, formatMeters(selected.x))}
+                  {tag((p.x + toSouth.x) / 2 + 24, (p.y + toSouth.y) / 2, formatMeters(selected.y))}
+                </g>
+              );
+            }
+            const floor = box.y + box.height;
+            return (
+              <g pointerEvents="none">
+                <circle cx={p.x} cy={p.y} r={10} fill="none" stroke={SELECT} strokeWidth="2.2" />
+                <g stroke={SELECT} strokeWidth="1.5">
+                  <line x1={p.x} y1={p.y + 10} x2={p.x} y2={floor} />
+                  <line x1={p.x} y1={p.y - 10} x2={p.x} y2={box.y} />
+                  <line x1={p.x - 10} y1={p.y} x2={box.x} y2={p.y} />
+                </g>
+                {tag(p.x - 25, floor - 10, formatMeters(selected.y))}
+                {tag(p.x, (p.y + box.y) / 2 + 11, formatMeters(room.height - selected.y))}
+                {tag((p.x + box.x) / 2 - 2, p.y - 11, formatMeters(selected.x))}
+              </g>
+            );
+          })()}
         </svg>
+      </div>
+
+      <div className="absolute bottom-3 left-3 flex items-end gap-2 px-2 py-1 bg-paper border border-line rounded no-print pointer-events-none">
+        <div data-testid="mjerna-traka" style={{ width: barMeters * scale }}>
+          <div className="text-center text-[12px] font-semibold leading-tight">
+            {formatMeters(barMeters)} m
+          </div>
+          <div className="h-1.5 border-x-2 border-b-2 border-ink" />
+        </div>
+      </div>
+
+      <div className="absolute bottom-3 right-3 flex items-center gap-0.5 p-0.5 bg-paper border border-line rounded no-print">
+        <button className="icon-btn" aria-label="Smanji" onClick={() => setZoom((z) => Math.max(0.5, z / ZOOM_STEP))}>
+          <ZoomOut className="w-4 h-4" />
+        </button>
+        <button className="icon-btn" aria-label="Prilagodi prozoru" onClick={() => setZoom(1)}>
+          <Maximize className="w-4 h-4" />
+        </button>
+        <button className="icon-btn" aria-label="Povećaj" onClick={() => setZoom((z) => Math.min(8, z * ZOOM_STEP))}>
+          <ZoomIn className="w-4 h-4" />
+        </button>
       </div>
     </div>
   );
-};
+});

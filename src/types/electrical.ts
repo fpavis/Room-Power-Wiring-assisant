@@ -40,12 +40,12 @@ export interface ElectricalNode {
   label: string;
   /**
    * For walls: horizontal distance from left edge of wall (0 .. wallWidth)
-   * For ceiling: distance along length (0 .. room.length)
+   * For ceiling: distance from the west wall (0 .. room.length)
    */
   x: number;
   /**
    * For walls: height from floor (0 .. room.height). Note: kota od poda = y, kota od stropa = room.height - y
-   * For ceiling: distance along width (0 .. room.width)
+   * For ceiling: distance from the south wall (0 .. room.width)
    */
   y: number;
   circuitId: string;
@@ -111,6 +111,9 @@ export interface RoutedSegment {
   toNodeId: string;
   surface: SurfaceId;
   points: { x: number; y: number }[];
+  /** Measured along the route axis, without reserve. */
+  routeLengthMeters: number;
+  /** Route plus termination slack in boxes. */
   lengthMeters: number;
   conduitDiameterMm: 16 | 20 | 25 | 32;
   conductors: WireConductor[];
@@ -159,10 +162,22 @@ export interface SocketBalanceSummary {
 }
 
 export interface BomSummary {
-  cablesBySpec: Record<string, number>; // spec -> total meters (including 10% reserve + box slack)
+  cablesBySpec: Record<string, number>; // spec -> total meters including box slack
   conduitsByDiameter: Record<number, number>; // diameter mm -> total meters
   countsByCategory: Record<ElementCategory, number>;
   breakersBySpec: Record<string, number>;
   wagoConnectorsCount: number;
   totalEstimatedLengthMeters: number;
+  /** Sum of route axes without slack or reserve. */
+  totalRouteLengthMeters: number;
+  /** Whole metres to buy, 10 % reserve per cable type. */
+  totalPurchaseCableMeters: number;
+}
+
+export interface ProjectData {
+  room: RoomDimensions;
+  openings: WallOpening[];
+  nodes: ElectricalNode[];
+  circuits: ElectricalCircuit[];
+  appliances: ApplianceItem[];
 }

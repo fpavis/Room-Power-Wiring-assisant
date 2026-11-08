@@ -4,6 +4,16 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { CONDUCTOR_META, ELEMENT_CATALOG, WALL_META } from '../data/presets';
 import {
+  getOrderedWallsAroundCenter,
+  getPrimaryJunctionBoxWall,
+} from '../engine/electricalEngine';
+import {
+  ceilingToView,
+  ELEMENT_FOOTPRINT,
+  formatMeters,
+  getCeilingViewSize,
+} from '../engine/geometry';
+import {
   ElectricalCircuit,
   ElectricalNode,
   RoomDimensions,
@@ -44,8 +54,8 @@ function wallPointToLocal3D(x: number, y: number, zOffset = 0.025): THREE.Vector
 function createTextLabelSprite(
   text: string,
   subText: string,
-  bgColor = '#0F172A',
-  borderColor = '#38BDF8'
+  bgColor = '#FFFFFF',
+  borderColor = '#111111'
 ): THREE.Sprite {
   const canvas = document.createElement('canvas');
   canvas.width = 256;
@@ -60,13 +70,13 @@ function createTextLabelSprite(
   ctx.fill();
   ctx.stroke();
 
-  ctx.fillStyle = '#F8FAFC';
-  ctx.font = 'bold 26px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#111111';
+  ctx.font = 'bold 26px "Plus Jakarta Sans", sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText(text.slice(0, 16), 128, 44);
 
-  ctx.fillStyle = '#94A3B8';
-  ctx.font = '20px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#555555';
+  ctx.font = '20px "Plus Jakarta Sans", sans-serif';
   ctx.fillText(subText.slice(0, 20), 128, 74);
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -75,6 +85,7 @@ function createTextLabelSprite(
     map: texture,
     transparent: true,
     depthTest: false,
+    toneMapped: false,
   });
   const sprite = new THREE.Sprite(mat);
   sprite.scale.set(0.45, 0.17, 1);
@@ -92,14 +103,13 @@ function buildProceduralNodeMesh(
   const group = new THREE.Group();
   group.userData = { nodeId: node.id, surface: node.surface };
 
-  const frameColor = isSelected ? 0x38bdf8 : 0xf1f5f9;
+  const frameColor = isSelected ? 0xc2007a : 0xffffff;
   const accentHex = new THREE.Color(circuitColor).getHex();
 
   const isDistBoard = node.category === 'distribution_board';
-  const isDouble =
-    node.category === 'socket_double' || node.category === 'switch_double';
-  const plateW = isDistBoard ? 0.30 : isDouble ? 0.15 : 0.09;
-  const plateH = isDistBoard ? 0.22 : 0.09;
+  const footprint = ELEMENT_FOOTPRINT[node.category];
+  const plateW = footprint.width;
+  const plateH = footprint.height;
   const plateGeo = new THREE.BoxGeometry(
     plateW,
     plateH,
@@ -117,7 +127,7 @@ function buildProceduralNodeMesh(
 
   if (node.category === 'distribution_board') {
     // Amber safety border & DIN rail with 5 miniature circuit breakers (osigurači)
-    const doorGeo = new THREE.BoxGeometry(0.26, 0.18, 0.05);
+    const doorGeo = new THREE.BoxGeometry(plateW - 0.04, plateH - 0.04, 0.05);
     const doorMat = new THREE.MeshStandardMaterial({
       color: 0x0f172a,
       roughness: 0.3,
@@ -227,7 +237,7 @@ function buildProceduralNodeMesh(
   if (isSelected) {
     const ringGeo = new THREE.RingGeometry(0.09, 0.115, 28);
     const ringMat = new THREE.MeshBasicMaterial({
-      color: 0x38bdf8,
+      color: 0xc2007a,
       side: THREE.DoubleSide,
     });
     const ring = new THREE.Mesh(ringGeo, ringMat);
@@ -237,13 +247,13 @@ function buildProceduralNodeMesh(
     const shortCode = ELEMENT_CATALOG[node.category]?.shortCode || 'EL';
     const subInfo =
       node.surface === 'ceiling'
-        ? `X:${node.x.toFixed(2)}m Y:${node.y.toFixed(2)}m`
-        : `↕Pod:${kotaPoda.toFixed(2)}m Strop:${kotaStropa.toFixed(2)}m`;
+        ? `Z ${formatMeters(node.x)} · J ${formatMeters(node.y)} m`
+        : `Pod ${formatMeters(kotaPoda)} · Strop ${formatMeters(kotaStropa)}`;
     const sprite = createTextLabelSprite(
       `${shortCode} · ${node.label.split(' ')[0]}`,
       subInfo,
-      '#0C4A6E',
-      '#38BDF8'
+      '#FFFFFF',
+      '#C2007A'
     );
     sprite.position.set(0, 0.16, 0.08);
     group.add(sprite);
@@ -336,8 +346,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
     const height = container.clientHeight || 600;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0b1120);
-    scene.fog = new THREE.FogExp2(0x0b1120, 0.018);
+    scene.background = new THREE.Color(0xe8e8e4);
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 150);
     camera.position.set(0, 4.2, 11.5);
@@ -363,7 +372,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
     scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
     pmremGenerator.dispose();
 
-    const hemiLight = new THREE.HemisphereLight(0x93c5fd, 0x1e293b, 0.9);
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0xd0d0cc, 1.1);
     scene.add(hemiLight);
 
     const keyLight = new THREE.DirectionalLight(0xfffbeb, 1.45);
@@ -371,11 +380,11 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
     keyLight.castShadow = !isHeadless;
     scene.add(keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.45);
+    const rimLight = new THREE.DirectionalLight(0xffffff, 0.45);
     rimLight.position.set(-8, 6, -7);
     scene.add(rimLight);
 
-    const worldGrid = new THREE.GridHelper(32, 64, 0x1e293b, 0x111827);
+    const worldGrid = new THREE.GridHelper(32, 32, 0xcfcfcb, 0xdededa);
     worldGrid.position.y = -0.02;
     scene.add(worldGrid);
 
@@ -504,36 +513,21 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
     const { length: L, width: W, height: H } = room;
 
-    const centerWall: WallId = (() => {
-      if (selectedNodeId) {
-        const sel = nodes.find((n) => n.id === selectedNodeId);
-        if (sel && sel.category === 'junction_box' && sel.surface !== 'ceiling') {
-          return sel.surface;
-        }
-      }
-      const firstRk = nodes.find(
-        (n) => n.category === 'junction_box' && n.surface !== 'ceiling'
-      );
-      return (firstRk?.surface as WallId) || 'north';
-    })();
-
-    const cwWalls: WallId[] = ['north', 'east', 'south', 'west'];
-    const cIdx = cwWalls.indexOf(centerWall);
-    const leftWall = cwWalls[(cIdx + 3) % 4];
-    const rightWall = cwWalls[(cIdx + 1) % 4];
-    const oppositeWall = cwWalls[(cIdx + 2) % 4];
+    const centerWall = getPrimaryJunctionBoxWall(nodes, selectedNodeId);
+    const [leftWall, , rightWall, oppositeWall] = getOrderedWallsAroundCenter(centerWall);
+    const ceilingView = getCeilingViewSize(room, centerWall);
 
     const getWSize = (w: WallId) => (w === 'north' || w === 'south' ? L : W);
     const centerW = getWSize(centerWall);
     const leftW = getWSize(leftWall);
     const rightW = getWSize(rightWall);
     const oppW = getWSize(oppositeWall);
-    const ceilDepth = centerWall === 'north' || centerWall === 'south' ? W : L;
+    const ceilDepth = ceilingView.height;
 
     // Floor Slab
     const floorGeo = new THREE.BoxGeometry(centerW, 0.04, ceilDepth);
     const floorMat = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
+      color: 0xdededa,
       roughness: 0.8,
       metalness: 0.1,
     });
@@ -551,8 +545,8 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
       const slabGeo = new THREE.BoxGeometry(wallWidth, wallHeight, 0.04);
       const slabMat = new THREE.MeshStandardMaterial({
-        color: 0x111827,
-        roughness: 0.65,
+        color: 0xffffff,
+        roughness: 0.75,
         metalness: 0.1,
         transparent: true,
         opacity: 0.92,
@@ -565,16 +559,16 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
       const borderLines = new THREE.LineSegments(
         new THREE.EdgesGeometry(slabGeo),
-        new THREE.LineBasicMaterial({ color: 0x38bdf8 })
+        new THREE.LineBasicMaterial({ color: 0x111111 })
       );
       slabMesh.add(borderLines);
 
       // Wall header label sprite
       const wallLabel = createTextLabelSprite(
         WALL_META[wallId].name,
-        `${wallWidth.toFixed(2)}m × ${wallHeight.toFixed(2)}m`,
-        '#0F172A',
-        '#475569'
+        `${formatMeters(wallWidth)} × ${formatMeters(wallHeight)} m`,
+        '#FFFFFF',
+        '#111111'
       );
       wallLabel.scale.set(0.85, 0.28, 1);
       wallLabel.position.set(wallWidth / 2, wallHeight + 0.18, 0.02);
@@ -582,9 +576,9 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
       if (showInstallZones) {
         const zoneMat = new THREE.MeshBasicMaterial({
-          color: 0x0ea5e9,
+          color: 0x111111,
           transparent: true,
-          opacity: 0.09,
+          opacity: 0.08,
           side: THREE.DoubleSide,
           depthWrite: false,
         });
@@ -615,7 +609,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
         const opGeo = new THREE.BoxGeometry(op.width, op.height, 0.055);
         const isDoor = op.type === 'door';
         const opMat = new THREE.MeshPhysicalMaterial({
-          color: isDoor ? 0x78350f : 0x38bdf8,
+          color: isDoor ? 0xa08a6a : 0xbfd4e6,
           roughness: isDoor ? 0.55 : 0.15,
           transmission: isDoor ? 0 : 0.7,
           transparent: true,
@@ -738,7 +732,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
     const ceilSlabGeo = new THREE.BoxGeometry(centerW, ceilDepth, 0.035);
     const ceilSlabMat = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
+      color: 0xffffff,
       roughness: 0.7,
       metalness: 0.1,
       transparent: true,
@@ -752,15 +746,15 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
     const ceilEdges = new THREE.LineSegments(
       new THREE.EdgesGeometry(ceilSlabGeo),
-      new THREE.LineBasicMaterial({ color: 0x38bdf8 })
+      new THREE.LineBasicMaterial({ color: 0x111111 })
     );
     ceilSlabMesh.add(ceilEdges);
 
     const ceilLabel = createTextLabelSprite(
       'Strop',
-      `${centerW.toFixed(2)}m × ${ceilDepth.toFixed(2)}m`,
-      '#0F172A',
-      '#475569'
+      `${formatMeters(centerW)} × ${formatMeters(ceilDepth)} m`,
+      '#FFFFFF',
+      '#111111'
     );
     ceilLabel.scale.set(0.85, 0.28, 1);
     ceilLabel.position.set(centerW / 2, ceilDepth + 0.18, 0.02);
@@ -780,7 +774,8 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
         room.height,
         0
       );
-      nodeGroup.position.set(n.x, n.y, 0.02);
+      const nodeView = ceilingToView(n, room, centerWall);
+      nodeGroup.position.set(nodeView.x, nodeView.y, 0.02);
       ceilingHinge.add(nodeGroup);
       clickableMeshesRef.current.push(nodeGroup);
     }
@@ -794,9 +789,9 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
       const baseColor = cir?.color || '#A855F7';
 
       if (!showWireConductors) {
-        const pts3D = seg.points.map(
-          (p) => new THREE.Vector3(p.x, p.y, 0.014)
-        );
+        const pts3D = seg.points
+          .map((p) => ceilingToView(p, room, centerWall))
+          .map((p) => new THREE.Vector3(p.x, p.y, 0.014));
         if (pts3D.length >= 2) {
           const path = new THREE.CurvePath<THREE.Vector3>();
           for (let i = 1; i < pts3D.length; i++) {
@@ -822,9 +817,9 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
         seg.conductors.forEach((cond, idx) => {
           const offset = (idx - (count - 1) / 2) * 0.016;
           const condColor = CONDUCTOR_META[cond]?.colorHex || '#F8FAFC';
-          const pts3D = seg.points.map(
-            (p) => new THREE.Vector3(p.x + offset, p.y + offset * 0.5, 0.018)
-          );
+          const pts3D = seg.points
+            .map((p) => ceilingToView(p, room, centerWall))
+            .map((p) => new THREE.Vector3(p.x + offset, p.y + offset * 0.5, 0.018));
           const lineGeo = new THREE.BufferGeometry().setFromPoints(pts3D);
           const lineMat = new THREE.LineBasicMaterial({
             color: new THREE.Color(condColor),
@@ -855,7 +850,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
   ]);
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-[#0B1120]">
+    <div className="relative w-full h-full overflow-hidden bg-desk">
       <div ref={mountRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
     </div>
   );

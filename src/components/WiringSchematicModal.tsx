@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, Zap, CheckCircle2, Info } from 'lucide-react';
 import { CONDUCTOR_META, ELEMENT_CATALOG } from '../data/presets';
 import {
@@ -49,6 +49,14 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
   const [sw2State, setSw2State] = useState<boolean>(false);
   const [crossState, setCrossState] = useState<boolean>(false);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const nodeSegments = node
     ? segments.filter((s) => s.fromNodeId === node.id || s.toNodeId === node.id)
     : [];
@@ -68,31 +76,32 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
   const isLamp2On = activeTab === 'switch_double' ? sw2State : false;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-      <div className="w-full max-w-5xl bg-[#0F172A] border border-slate-800 rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 no-print">
+      <div className="w-full max-w-5xl bg-paper rounded-lg overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 bg-[#111827] border-b border-slate-800">
+        <div className="flex items-center justify-between px-6 py-4 bg-paper border-b border-line">
           <div>
-            <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-              <Zap className="w-5 h-5 text-amber-400" />
+            <h2 className="text-lg font-bold text-ink flex items-center gap-2">
+              <Zap className="w-5 h-5 text-ink" />
               Shema spajanja vodiča (Faza L, Nula N, Uzemljenje PE) i bužira
             </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-xs text-muted mt-0.5">
               {node
                 ? `Odabrani element: ${node.label} (${ELEMENT_CATALOG[node.category]?.name}) · Krug: ${circuit?.code || 'SK'}`
-                : 'Interaktivni prikaz ožičenja razvodne kutije, prekidača, utičnica i trošila prema IEC 60446 standardu'}
+                : 'Prikaz ožičenja prekidača i utičnica prema normi IEC 60446'}
             </p>
           </div>
           <button
             onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+            aria-label="Zatvori"
+            className="p-2 text-muted hover:text-ink rounded-lg hover:bg-desk transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Selector Tabs for Schematic Types */}
-        <div className="flex flex-wrap items-center gap-1.5 px-6 py-3 bg-[#0B1120] border-b border-slate-800">
+        <div className="flex flex-wrap items-center gap-1.5 px-6 py-3 bg-panel border-b border-line">
           {[
             { id: 'switch_single', label: 'Jednopolni prekidač (P1)' },
             { id: 'switch_double', label: 'Serijski / Dvostruki (P2)' },
@@ -106,8 +115,8 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
               onClick={() => setActiveTab(t.id as SchematicTab)}
               className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === t.id
-                  ? 'bg-sky-600 text-white'
-                  : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                  ? 'bg-ink text-paper'
+                  : 'bg-paper text-muted hover:text-ink border border-line'
               }`}
             >
               {t.label}
@@ -119,17 +128,17 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
         <div className="p-6 overflow-y-auto space-y-6">
           {/* Interactive Simulation Controls */}
           {activeTab.startsWith('switch_') && (
-            <div className="flex flex-wrap items-center justify-between gap-4 p-3.5 bg-slate-900/90 border border-slate-800 rounded-lg">
+            <div className="flex flex-wrap items-center justify-between gap-4 p-3.5 bg-panel border border-line rounded-lg">
               <div className="flex items-center gap-3">
-                <span className="text-xs font-semibold text-slate-300">
+                <span className="text-xs font-semibold text-ink">
                   Simulacija protoka faze (kliknite na prekidač za testiranje):
                 </span>
                 <button
                   onClick={() => setSw1State((v) => !v)}
-                  className={`px-3 py-1.5 text-xs font-mono font-semibold rounded border transition-colors ${
+                  className={`px-3 py-1.5 text-xs  font-semibold rounded border transition-colors ${
                     sw1State
-                      ? 'bg-amber-500/20 border-amber-500 text-amber-300'
-                      : 'bg-slate-800 border-slate-700 text-slate-300'
+                      ? 'bg-warn border-ink text-ink'
+                      : 'bg-desk border-line text-ink'
                   }`}
                 >
                   Prekidač 1: {sw1State ? 'POLOŽAJ A (UKLJ)' : 'POLOŽAJ B (ISKLJ)'}
@@ -140,10 +149,10 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   activeTab === 'switch_cross') && (
                   <button
                     onClick={() => setSw2State((v) => !v)}
-                    className={`px-3 py-1.5 text-xs font-mono font-semibold rounded border transition-colors ${
+                    className={`px-3 py-1.5 text-xs  font-semibold rounded border transition-colors ${
                       sw2State
-                        ? 'bg-amber-500/20 border-amber-500 text-amber-300'
-                        : 'bg-slate-800 border-slate-700 text-slate-300'
+                        ? 'bg-warn border-ink text-ink'
+                        : 'bg-desk border-line text-ink'
                     }`}
                   >
                     {activeTab === 'switch_double'
@@ -155,10 +164,10 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                 {activeTab === 'switch_cross' && (
                   <button
                     onClick={() => setCrossState((v) => !v)}
-                    className={`px-3 py-1.5 text-xs font-mono font-semibold rounded border transition-colors ${
+                    className={`px-3 py-1.5 text-xs  font-semibold rounded border transition-colors ${
                       crossState
-                        ? 'bg-sky-500/20 border-sky-400 text-sky-300'
-                        : 'bg-slate-800 border-slate-700 text-slate-300'
+                        ? 'bg-warn border-ink text-ink'
+                        : 'bg-desk border-line text-ink'
                     }`}
                   >
                     Križni prekidač: {crossState ? 'KRIŽNO (✕)' : 'RAVNO (═)'}
@@ -166,12 +175,12 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                 )}
               </div>
 
-              <div className="flex items-center gap-2 font-mono text-xs">
+              <div className="flex items-center gap-2  text-xs">
                 <span
                   className={`px-2.5 py-1 rounded font-semibold ${
                     isLamp1On
-                      ? 'bg-amber-400/20 text-amber-300 border border-amber-400/50'
-                      : 'bg-slate-800 text-slate-400'
+                      ? 'bg-warn text-ink border border-ink'
+                      : 'bg-desk text-muted'
                   }`}
                 >
                   Svjetlo 1: {isLamp1On ? 'SVIJETLI (230V)' : 'UGAŠENO (0V)'}
@@ -180,8 +189,8 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   <span
                     className={`px-2.5 py-1 rounded font-semibold ${
                       isLamp2On
-                        ? 'bg-amber-400/20 text-amber-300 border border-amber-400/50'
-                        : 'bg-slate-800 text-slate-400'
+                        ? 'bg-warn text-ink border border-ink'
+                        : 'bg-desk text-muted'
                     }`}
                   >
                     Svjetlo 2: {isLamp2On ? 'SVIJETLI (230V)' : 'UGAŠENO (0V)'}
@@ -192,50 +201,50 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
           )}
 
           {/* Interactive SVG Wiring Diagram */}
-          <div className="bg-[#080D1A] border border-slate-800 rounded-xl p-4 overflow-x-auto">
+          <div className="bg-paper border border-line rounded-xl p-4 overflow-x-auto">
             <svg viewBox="0 0 880 390" className="w-full min-w-[740px] h-auto">
               {/* 1. SINGLE-POLE SWITCH (JEDNOPOLNI PREKIDAČ) */}
               {activeTab === 'switch_single' && (
                 <g>
                   {/* Main Power Supply Input */}
-                  <text x="25" y="45" fill="#94A3B8" fontSize="11" fontWeight="700" fontFamily="Plus Jakarta Sans">
-                    DOVOD IZ ORMARIĆA (3×1.5 mm²)
+                  <text x="25" y="45" fill="#555555" fontSize="11" fontWeight="700" fontFamily="Plus Jakarta Sans">
+                    DOVOD IZ ORMARIĆA (3×1,5 mm²)
                   </text>
                   {/* L, N, PE Incoming Lines */}
-                  <line x1="25" y1="75" x2="250" y2="75" stroke="#D97706" strokeWidth="3.5" />
-                  <text x="30" y="68" fill="#F59E0B" fontSize="10" fontFamily="JetBrains Mono">Faza L (Smeđa)</text>
+                  <line x1="25" y1="75" x2="250" y2="75" stroke="#7A4A1E" strokeWidth="3.5" />
+                  <text x="30" y="68" fill="#A85400" fontSize="10" fontFamily="JetBrains Mono">Faza L (Smeđa)</text>
 
-                  <line x1="25" y1="110" x2="250" y2="110" stroke="#3B82F6" strokeWidth="3.5" />
-                  <text x="30" y="103" fill="#60A5FA" fontSize="10" fontFamily="JetBrains Mono">Nula N (Plava)</text>
+                  <line x1="25" y1="110" x2="250" y2="110" stroke="#0A5FC4" strokeWidth="3.5" />
+                  <text x="30" y="103" fill="#0A5FC4" fontSize="10" fontFamily="JetBrains Mono">Nula N (Plava)</text>
 
-                  <line x1="25" y1="145" x2="250" y2="145" stroke="#10B981" strokeWidth="3.5" strokeDasharray="6 3" />
-                  <text x="30" y="138" fill="#34D399" fontSize="10" fontFamily="JetBrains Mono">Uzemljenje PE (Žuto-zelena)</text>
+                  <line x1="25" y1="145" x2="250" y2="145" stroke="#00753B" strokeWidth="3.5" strokeDasharray="6 3" />
+                  <text x="30" y="138" fill="#00753B" fontSize="10" fontFamily="JetBrains Mono">Uzemljenje PE (Žuto-zelena)</text>
 
                   {/* Razvodna Kutija (Junction Box) */}
-                  <rect x="230" y="40" width="240" height="145" rx="10" fill="#111827" stroke="#475569" strokeWidth="2" />
-                  <text x="350" y="60" textAnchor="middle" fill="#E2E8F0" fontSize="12" fontWeight="700">
+                  <rect x="230" y="40" width="240" height="145" rx="10" fill="#FFFFFF" stroke="#555555" strokeWidth="2" />
+                  <text x="350" y="60" textAnchor="middle" fill="#111111" fontSize="12" fontWeight="700">
                     RAZVODNA KUTIJA Ø80 (WAGO spojevi)
                   </text>
 
                   {/* WAGO Terminals inside box */}
-                  <circle cx="280" cy="75" r="6" fill="#D97706" />
-                  <circle cx="350" cy="110" r="6" fill="#3B82F6" />
-                  <circle cx="390" cy="145" r="6" fill="#10B981" />
-                  <circle cx="420" cy="92" r="6" fill="#F97316" />
+                  <circle cx="280" cy="75" r="6" fill="#7A4A1E" />
+                  <circle cx="350" cy="110" r="6" fill="#0A5FC4" />
+                  <circle cx="390" cy="145" r="6" fill="#00753B" />
+                  <circle cx="420" cy="92" r="6" fill="#C2410C" />
 
                   {/* Conduit downward to Switch */}
-                  <rect x="265" y="195" width="95" height="24" rx="4" fill="#1E293B" stroke="#334155" />
-                  <text x="312" y="211" textAnchor="middle" fill="#CBD5E1" fontSize="9.5" fontFamily="JetBrains Mono">
+                  <rect x="265" y="195" width="95" height="24" rx="4" fill="#F4F4F2" stroke="#555555" />
+                  <text x="312" y="211" textAnchor="middle" fill="#222222" fontSize="9.5" fontFamily="JetBrains Mono">
                     Bužir Ø16 (3×1.5)
                   </text>
 
                   {/* Phase down to switch L terminal */}
-                  <path d="M 280 75 L 280 285" fill="none" stroke="#D97706" strokeWidth="3.5" />
+                  <path d="M 280 75 L 280 285" fill="none" stroke="#7A4A1E" strokeWidth="3.5" />
                   {/* Switched Phase L' returning from switch to Junction box */}
                   <path
                     d="M 335 285 L 335 92 L 420 92"
                     fill="none"
-                    stroke={isLamp1On ? '#F97316' : '#475569'}
+                    stroke={isLamp1On ? '#C2410C' : '#555555'}
                     strokeWidth="3.5"
                   />
 
@@ -246,19 +255,19 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     width="135"
                     height="110"
                     rx="10"
-                    fill="#1E293B"
-                    stroke="#38BDF8"
+                    fill="#F4F4F2"
+                    stroke="#111111"
                     strokeWidth="2"
                     className="cursor-pointer"
                     onClick={() => setSw1State((v) => !v)}
                   />
-                  <text x="312" y="275" textAnchor="middle" fill="#F8FAFC" fontSize="11" fontWeight="700">
+                  <text x="312" y="275" textAnchor="middle" fill="#111111" fontSize="11" fontWeight="700">
                     JEDNOPOLNI PREKIDAČ
                   </text>
-                  <circle cx="280" cy="295" r="5" fill="#D97706" />
-                  <text x="280" y="314" textAnchor="middle" fill="#F59E0B" fontSize="9" fontFamily="JetBrains Mono">L (Ulaz)</text>
-                  <circle cx="335" cy="295" r="5" fill="#F97316" />
-                  <text x="335" y="314" textAnchor="middle" fill="#FB923C" fontSize="9" fontFamily="JetBrains Mono">L&apos; (Izlaz)</text>
+                  <circle cx="280" cy="295" r="5" fill="#7A4A1E" />
+                  <text x="280" y="314" textAnchor="middle" fill="#A85400" fontSize="9" fontFamily="JetBrains Mono">L (Ulaz)</text>
+                  <circle cx="335" cy="295" r="5" fill="#C2410C" />
+                  <text x="335" y="314" textAnchor="middle" fill="#C2410C" fontSize="9" fontFamily="JetBrains Mono">L&apos; (Izlaz)</text>
 
                   {/* Switch Contact Blade */}
                   <line
@@ -266,17 +275,17 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     y1="295"
                     x2={sw1State ? 335 : 325}
                     y2={sw1State ? 295 : 272}
-                    stroke="#F8FAFC"
+                    stroke="#111111"
                     strokeWidth="3.5"
                     strokeLinecap="round"
                   />
-                  <text x="312" y="352" textAnchor="middle" fill="#38BDF8" fontSize="9.5" fontFamily="JetBrains Mono">
+                  <text x="312" y="352" textAnchor="middle" fill="#111111" fontSize="9.5" fontFamily="JetBrains Mono">
                     [Klikni za preklapanje]
                   </text>
 
                   {/* Conduit from Junction Box to Ceiling Lamp */}
-                  <rect x="490" y="45" width="120" height="22" rx="4" fill="#1E293B" stroke="#334155" />
-                  <text x="550" y="60" textAnchor="middle" fill="#CBD5E1" fontSize="9.5" fontFamily="JetBrains Mono">
+                  <rect x="490" y="45" width="120" height="22" rx="4" fill="#F4F4F2" stroke="#555555" />
+                  <text x="550" y="60" textAnchor="middle" fill="#222222" fontSize="9.5" fontFamily="JetBrains Mono">
                     Bužir Ø16 prema stropu
                   </text>
 
@@ -286,26 +295,26 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     y1="92"
                     x2="680"
                     y2="92"
-                    stroke={isLamp1On ? '#F97316' : '#475569'}
+                    stroke={isLamp1On ? '#C2410C' : '#555555'}
                     strokeWidth="3.5"
                   />
-                  <line x1="350" y1="110" x2="680" y2="110" stroke="#3B82F6" strokeWidth="3.5" />
-                  <line x1="390" y1="145" x2="680" y2="145" stroke="#10B981" strokeWidth="3.5" strokeDasharray="6 3" />
+                  <line x1="350" y1="110" x2="680" y2="110" stroke="#0A5FC4" strokeWidth="3.5" />
+                  <line x1="390" y1="145" x2="680" y2="145" stroke="#00753B" strokeWidth="3.5" strokeDasharray="6 3" />
 
                   {/* Ceiling Light Fixture */}
-                  <rect x="680" y="55" width="165" height="115" rx="12" fill="#111827" stroke={isLamp1On ? '#FACC15' : '#475569'} strokeWidth="2.5" />
+                  <rect x="680" y="55" width="165" height="115" rx="12" fill="#FFFFFF" stroke={isLamp1On ? '#FACC15' : '#555555'} strokeWidth="2.5" />
                   <circle
                     cx="762"
                     cy="105"
                     r="26"
-                    fill={isLamp1On ? '#FEF08A' : '#1E293B'}
-                    stroke={isLamp1On ? '#FACC15' : '#64748B'}
+                    fill={isLamp1On ? '#FEF08A' : '#F4F4F2'}
+                    stroke={isLamp1On ? '#FACC15' : '#555555'}
                     strokeWidth="3"
                   />
-                  <text x="762" y="110" textAnchor="middle" fill={isLamp1On ? '#713F12' : '#94A3B8'} fontSize="12" fontWeight="700" fontFamily="JetBrains Mono">
+                  <text x="762" y="110" textAnchor="middle" fill={isLamp1On ? '#713F12' : '#555555'} fontSize="12" fontWeight="700" fontFamily="JetBrains Mono">
                     {isLamp1On ? 'ON' : 'OFF'}
                   </text>
-                  <text x="762" y="154" textAnchor="middle" fill="#E2E8F0" fontSize="11" fontWeight="600">
+                  <text x="762" y="154" textAnchor="middle" fill="#111111" fontSize="11" fontWeight="600">
                     STROPNO SVJETLO (L&apos;+N+PE)
                   </text>
                 </g>
@@ -314,64 +323,64 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
               {/* 2. DOUBLE / SERIAL SWITCH (SERIJSKI PREKIDAČ) */}
               {activeTab === 'switch_double' && (
                 <g>
-                  <text x="25" y="45" fill="#94A3B8" fontSize="11" fontWeight="700">
-                    DOVOD IZ ORMARIĆA (3×1.5 mm²)
+                  <text x="25" y="45" fill="#555555" fontSize="11" fontWeight="700">
+                    DOVOD IZ ORMARIĆA (3×1,5 mm²)
                   </text>
-                  <line x1="25" y1="75" x2="275" y2="75" stroke="#D97706" strokeWidth="3.5" />
-                  <line x1="25" y1="110" x2="660" y2="110" stroke="#3B82F6" strokeWidth="3.5" />
-                  <line x1="25" y1="145" x2="660" y2="145" stroke="#10B981" strokeWidth="3.5" strokeDasharray="6 3" />
+                  <line x1="25" y1="75" x2="275" y2="75" stroke="#7A4A1E" strokeWidth="3.5" />
+                  <line x1="25" y1="110" x2="660" y2="110" stroke="#0A5FC4" strokeWidth="3.5" />
+                  <line x1="25" y1="145" x2="660" y2="145" stroke="#00753B" strokeWidth="3.5" strokeDasharray="6 3" />
 
                   {/* Junction box */}
-                  <rect x="220" y="40" width="250" height="140" rx="10" fill="#111827" stroke="#475569" strokeWidth="2" />
-                  <text x="345" y="60" textAnchor="middle" fill="#E2E8F0" fontSize="12" fontWeight="700">
-                    RAZVODNA KUTIJA (5×1.5 mm² prema P2)
+                  <rect x="220" y="40" width="250" height="140" rx="10" fill="#FFFFFF" stroke="#555555" strokeWidth="2" />
+                  <text x="345" y="60" textAnchor="middle" fill="#111111" fontSize="12" fontWeight="700">
+                    RAZVODNA KUTIJA (5×1,5 mm² prema P2)
                   </text>
 
                   {/* Phase down to switch L */}
-                  <line x1="275" y1="75" x2="275" y2="290" stroke="#D97706" strokeWidth="3.5" />
+                  <line x1="275" y1="75" x2="275" y2="290" stroke="#7A4A1E" strokeWidth="3.5" />
                   {/* Switched L1' */}
                   <path
                     d="M 325 290 L 325 88 L 660 88"
                     fill="none"
-                    stroke={isLamp1On ? '#F97316' : '#475569'}
+                    stroke={isLamp1On ? '#C2410C' : '#555555'}
                     strokeWidth="3.5"
                   />
                   {/* Switched L2'' */}
                   <path
                     d="M 375 290 L 375 215 L 660 215"
                     fill="none"
-                    stroke={isLamp2On ? '#EC4899' : '#475569'}
+                    stroke={isLamp2On ? '#6D35B8' : '#555555'}
                     strokeWidth="3.5"
                   />
 
-                  <rect x="235" y="245" width="180" height="120" rx="10" fill="#1E293B" stroke="#38BDF8" strokeWidth="2" />
-                  <text x="325" y="268" textAnchor="middle" fill="#F8FAFC" fontSize="11" fontWeight="700">
+                  <rect x="235" y="245" width="180" height="120" rx="10" fill="#F4F4F2" stroke="#111111" strokeWidth="2" />
+                  <text x="325" y="268" textAnchor="middle" fill="#111111" fontSize="11" fontWeight="700">
                     SERIJSKI PREKIDAČ (P2)
                   </text>
-                  <circle cx="275" cy="295" r="5" fill="#D97706" />
-                  <text x="275" y="318" textAnchor="middle" fill="#F59E0B" fontSize="9" fontFamily="JetBrains Mono">L (Ulaz)</text>
+                  <circle cx="275" cy="295" r="5" fill="#7A4A1E" />
+                  <text x="275" y="318" textAnchor="middle" fill="#A85400" fontSize="9" fontFamily="JetBrains Mono">L (Ulaz)</text>
 
-                  <circle cx="325" cy="295" r="5" fill="#F97316" />
-                  <text x="325" y="318" textAnchor="middle" fill="#FB923C" fontSize="9" fontFamily="JetBrains Mono">L1&apos;</text>
+                  <circle cx="325" cy="295" r="5" fill="#C2410C" />
+                  <text x="325" y="318" textAnchor="middle" fill="#C2410C" fontSize="9" fontFamily="JetBrains Mono">L1&apos;</text>
 
-                  <circle cx="375" cy="295" r="5" fill="#EC4899" />
-                  <text x="375" y="318" textAnchor="middle" fill="#F472B6" fontSize="9" fontFamily="JetBrains Mono">L2&apos;&apos;</text>
+                  <circle cx="375" cy="295" r="5" fill="#6D35B8" />
+                  <text x="375" y="318" textAnchor="middle" fill="#6D35B8" fontSize="9" fontFamily="JetBrains Mono">L2&apos;&apos;</text>
 
                   {/* Lamp 1 */}
-                  <rect x="660" y="55" width="180" height="105" rx="10" fill="#111827" stroke={isLamp1On ? '#FACC15' : '#475569'} strokeWidth="2" />
-                  <text x="750" y="105" textAnchor="middle" fill={isLamp1On ? '#FEF08A' : '#64748B'} fontSize="13" fontWeight="700">
+                  <rect x="660" y="55" width="180" height="105" rx="10" fill="#FFFFFF" stroke={isLamp1On ? '#FACC15' : '#555555'} strokeWidth="2" />
+                  <text x="750" y="105" textAnchor="middle" fill={isLamp1On ? '#FEF08A' : '#555555'} fontSize="13" fontWeight="700">
                     GRUPA SVJETALA 1: {isLamp1On ? 'UKLJ' : 'ISKLJ'}
                   </text>
-                  <text x="750" y="135" textAnchor="middle" fill="#94A3B8" fontSize="10" fontFamily="JetBrains Mono">
+                  <text x="750" y="135" textAnchor="middle" fill="#555555" fontSize="10" fontFamily="JetBrains Mono">
                     Vodiči: L1&apos; + N + PE
                   </text>
 
                   {/* Lamp 2 */}
-                  <rect x="660" y="185" width="180" height="105" rx="10" fill="#111827" stroke={isLamp2On ? '#EC4899' : '#475569'} strokeWidth="2" />
-                  <text x="750" y="235" textAnchor="middle" fill={isLamp2On ? '#FBCFE8' : '#64748B'} fontSize="13" fontWeight="700">
+                  <rect x="660" y="185" width="180" height="105" rx="10" fill="#FFFFFF" stroke={isLamp2On ? '#6D35B8' : '#555555'} strokeWidth="2" />
+                  <text x="750" y="235" textAnchor="middle" fill={isLamp2On ? '#FBCFE8' : '#555555'} fontSize="13" fontWeight="700">
                     GRUPA SVJETALA 2: {isLamp2On ? 'UKLJ' : 'ISKLJ'}
                   </text>
-                  <text x="750" y="265" textAnchor="middle" fill="#94A3B8" fontSize="10" fontFamily="JetBrains Mono">
+                  <text x="750" y="265" textAnchor="middle" fill="#555555" fontSize="10" fontFamily="JetBrains Mono">
                     Vodiči: L2&apos;&apos; + N + PE
                   </text>
                 </g>
@@ -380,20 +389,20 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
               {/* 3. TWO-WAY SWITCH (IZMJENIČNI SPOJ S 2 MJESTA) */}
               {activeTab === 'switch_two_way' && (
                 <g>
-                  <text x="20" y="36" fill="#94A3B8" fontSize="11" fontWeight="700">
-                    IZMJENIČNI SPOJ (Upravljanje rasvjetom s 2 mjesta — Bužir Ø20 / NYM-J 5×1.5 mm²)
+                  <text x="20" y="36" fill="#555555" fontSize="11" fontWeight="700">
+                    IZMJENIČNI SPOJ (Upravljanje rasvjetom s 2 mjesta — Bužir Ø20 / NYM-J 5×1,5 mm²)
                   </text>
 
                   {/* Supply L, N, PE */}
-                  <line x1="25" y1="75" x2="175" y2="75" stroke="#D97706" strokeWidth="3.5" />
-                  <line x1="175" y1="75" x2="175" y2="255" stroke="#D97706" strokeWidth="3.5" />
-                  <text x="30" y="67" fill="#F59E0B" fontSize="10" fontFamily="JetBrains Mono">Stalna Faza L (Smeđa) → u L ulaz 1. prekidača</text>
+                  <line x1="25" y1="75" x2="175" y2="75" stroke="#7A4A1E" strokeWidth="3.5" />
+                  <line x1="175" y1="75" x2="175" y2="255" stroke="#7A4A1E" strokeWidth="3.5" />
+                  <text x="30" y="67" fill="#A85400" fontSize="10" fontFamily="JetBrains Mono">Stalna Faza L (Smeđa) → u L ulaz 1. prekidača</text>
 
-                  <line x1="25" y1="115" x2="700" y2="115" stroke="#3B82F6" strokeWidth="3.5" />
-                  <text x="30" y="108" fill="#60A5FA" fontSize="10" fontFamily="JetBrains Mono">Nula N (Plava) → izravno na rasvjetno tijelo</text>
+                  <line x1="25" y1="115" x2="700" y2="115" stroke="#0A5FC4" strokeWidth="3.5" />
+                  <text x="30" y="108" fill="#0A5FC4" fontSize="10" fontFamily="JetBrains Mono">Nula N (Plava) → izravno na rasvjetno tijelo</text>
 
-                  <line x1="25" y1="150" x2="700" y2="150" stroke="#10B981" strokeWidth="3.5" strokeDasharray="6 3" />
-                  <text x="30" y="143" fill="#34D399" fontSize="10" fontFamily="JetBrains Mono">Uzemljenje PE (Žuto-zelena) → izravno na rasvjetno tijelo</text>
+                  <line x1="25" y1="150" x2="700" y2="150" stroke="#00753B" strokeWidth="3.5" strokeDasharray="6 3" />
+                  <text x="30" y="143" fill="#00753B" fontSize="10" fontFamily="JetBrains Mono">Uzemljenje PE (Žuto-zelena) → izravno na rasvjetno tijelo</text>
 
                   {/* Switch 1 (Izmjenični 1) */}
                   <rect
@@ -402,20 +411,20 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     width="180"
                     height="135"
                     rx="10"
-                    fill="#1E293B"
-                    stroke="#38BDF8"
+                    fill="#F4F4F2"
+                    stroke="#111111"
                     strokeWidth="2"
                     className="cursor-pointer"
                     onClick={() => setSw1State((v) => !v)}
                   />
-                  <text x="200" y="242" textAnchor="middle" fill="#F8FAFC" fontSize="11" fontWeight="700">
+                  <text x="200" y="242" textAnchor="middle" fill="#111111" fontSize="11" fontWeight="700">
                     IZMJENIČNI PREKIDAČ 1
                   </text>
-                  <circle cx="175" cy="265" r="5" fill="#D97706" />
-                  <text x="150" y="269" fill="#F59E0B" fontSize="9.5" fontFamily="JetBrains Mono">L</text>
+                  <circle cx="175" cy="265" r="5" fill="#7A4A1E" />
+                  <text x="150" y="269" fill="#A85400" fontSize="9.5" fontFamily="JetBrains Mono">L</text>
 
-                  <circle cx="245" cy="255" r="5" fill="#94A3B8" />
-                  <circle cx="245" cy="295" r="5" fill="#E2E8F0" />
+                  <circle cx="245" cy="255" r="5" fill="#555555" />
+                  <circle cx="245" cy="295" r="5" fill="#111111" />
 
                   {/* Switch 1 Blade */}
                   <line
@@ -423,7 +432,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     y1="265"
                     x2="245"
                     y2={sw1State ? 255 : 295}
-                    stroke="#F59E0B"
+                    stroke="#A85400"
                     strokeWidth="3.5"
                   />
 
@@ -433,11 +442,11 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     y1="255"
                     x2="455"
                     y2="255"
-                    stroke={sw1State ? '#F59E0B' : '#64748B'}
+                    stroke={sw1State ? '#A85400' : '#555555'}
                     strokeWidth="3.5"
                   />
-                  <text x="350" y="246" textAnchor="middle" fill="#CBD5E1" fontSize="9.5" fontFamily="JetBrains Mono">
-                    Korespondent K1 (Siva žica)
+                  <text x="350" y="246" textAnchor="middle" fill="#222222" fontSize="9.5" fontFamily="JetBrains Mono">
+                    K1 (siva)
                   </text>
 
                   <line
@@ -445,11 +454,11 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     y1="295"
                     x2="455"
                     y2="295"
-                    stroke={!sw1State ? '#F59E0B' : '#64748B'}
+                    stroke={!sw1State ? '#A85400' : '#555555'}
                     strokeWidth="3.5"
                   />
-                  <text x="350" y="313" textAnchor="middle" fill="#CBD5E1" fontSize="9.5" fontFamily="JetBrains Mono">
-                    Korespondent K2 (Crna žica)
+                  <text x="350" y="313" textAnchor="middle" fill="#222222" fontSize="9.5" fontFamily="JetBrains Mono">
+                    K2 (crna)
                   </text>
 
                   {/* Switch 2 (Izmjenični 2) */}
@@ -459,19 +468,19 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     width="180"
                     height="135"
                     rx="10"
-                    fill="#1E293B"
-                    stroke="#38BDF8"
+                    fill="#F4F4F2"
+                    stroke="#111111"
                     strokeWidth="2"
                     className="cursor-pointer"
                     onClick={() => setSw2State((v) => !v)}
                   />
-                  <text x="505" y="242" textAnchor="middle" fill="#F8FAFC" fontSize="11" fontWeight="700">
+                  <text x="505" y="242" textAnchor="middle" fill="#111111" fontSize="11" fontWeight="700">
                     IZMJENIČNI PREKIDAČ 2
                   </text>
-                  <circle cx="455" cy="255" r="5" fill="#94A3B8" />
-                  <circle cx="455" cy="295" r="5" fill="#E2E8F0" />
-                  <circle cx="535" cy="275" r="5" fill="#F97316" />
-                  <text x="558" y="279" fill="#FB923C" fontSize="9.5" fontFamily="JetBrains Mono">L&apos;</text>
+                  <circle cx="455" cy="255" r="5" fill="#555555" />
+                  <circle cx="455" cy="295" r="5" fill="#111111" />
+                  <circle cx="535" cy="275" r="5" fill="#C2410C" />
+                  <text x="558" y="279" fill="#C2410C" fontSize="9.5" fontFamily="JetBrains Mono">L&apos;</text>
 
                   {/* Switch 2 Blade */}
                   <line
@@ -479,7 +488,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                     y1="275"
                     x2="455"
                     y2={sw2State ? 255 : 295}
-                    stroke={isLamp1On ? '#F97316' : '#64748B'}
+                    stroke={isLamp1On ? '#C2410C' : '#555555'}
                     strokeWidth="3.5"
                   />
 
@@ -487,27 +496,27 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   <path
                     d="M 535 275 L 635 275 L 635 85 L 700 85"
                     fill="none"
-                    stroke={isLamp1On ? '#F97316' : '#475569'}
+                    stroke={isLamp1On ? '#C2410C' : '#555555'}
                     strokeWidth="3.5"
                   />
-                  <text x="635" y="195" textAnchor="middle" fill="#FB923C" fontSize="9.5" fontFamily="JetBrains Mono">
+                  <text x="635" y="195" textAnchor="middle" fill="#C2410C" fontSize="9.5" fontFamily="JetBrains Mono">
                     Komutirana faza L&apos;
                   </text>
 
                   {/* Ceiling Lamp */}
-                  <rect x="700" y="60" width="155" height="115" rx="12" fill="#111827" stroke={isLamp1On ? '#FACC15' : '#475569'} strokeWidth="2.5" />
+                  <rect x="700" y="60" width="155" height="115" rx="12" fill="#FFFFFF" stroke={isLamp1On ? '#FACC15' : '#555555'} strokeWidth="2.5" />
                   <circle
                     cx="777"
                     cy="112"
                     r="24"
-                    fill={isLamp1On ? '#FEF08A' : '#1E293B'}
-                    stroke={isLamp1On ? '#FACC15' : '#64748B'}
+                    fill={isLamp1On ? '#FEF08A' : '#F4F4F2'}
+                    stroke={isLamp1On ? '#FACC15' : '#555555'}
                     strokeWidth="2.5"
                   />
-                  <text x="777" y="116" textAnchor="middle" fill={isLamp1On ? '#713F12' : '#94A3B8'} fontSize="11" fontWeight="700" fontFamily="JetBrains Mono">
+                  <text x="777" y="116" textAnchor="middle" fill={isLamp1On ? '#713F12' : '#555555'} fontSize="11" fontWeight="700" fontFamily="JetBrains Mono">
                     {isLamp1On ? '230V ON' : '0V OFF'}
                   </text>
-                  <text x="777" y="158" textAnchor="middle" fill="#E2E8F0" fontSize="10" fontWeight="600">
+                  <text x="777" y="158" textAnchor="middle" fill="#111111" fontSize="10" fontWeight="600">
                     STROPNO SVJETLO
                   </text>
                 </g>
@@ -516,69 +525,69 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
               {/* 4. CROSS SWITCH (KRIŽNI SPOJ S 3 MJESTA) */}
               {activeTab === 'switch_cross' && (
                 <g>
-                  <text x="20" y="36" fill="#94A3B8" fontSize="11" fontWeight="700">
-                    KRIŽNI SPOJ (2 Izmjenična + 1 Križni prekidač u sredini — Bužir Ø20 / 5×1.5 mm²)
+                  <text x="20" y="36" fill="#555555" fontSize="11" fontWeight="700">
+                    KRIŽNI SPOJ (2 Izmjenična + 1 Križni prekidač u sredini — Bužir Ø20 / 5×1,5 mm²)
                   </text>
 
-                  <line x1="25" y1="80" x2="95" y2="80" stroke="#D97706" strokeWidth="3.5" />
-                  <line x1="95" y1="80" x2="95" y2="265" stroke="#D97706" strokeWidth="3.5" />
-                  <line x1="25" y1="115" x2="720" y2="115" stroke="#3B82F6" strokeWidth="3.5" />
-                  <line x1="25" y1="145" x2="720" y2="145" stroke="#10B981" strokeWidth="3.5" strokeDasharray="6 3" />
+                  <line x1="25" y1="80" x2="95" y2="80" stroke="#7A4A1E" strokeWidth="3.5" />
+                  <line x1="95" y1="80" x2="95" y2="265" stroke="#7A4A1E" strokeWidth="3.5" />
+                  <line x1="25" y1="115" x2="720" y2="115" stroke="#0A5FC4" strokeWidth="3.5" />
+                  <line x1="25" y1="145" x2="720" y2="145" stroke="#00753B" strokeWidth="3.5" strokeDasharray="6 3" />
 
                   {/* Izmjenični 1 */}
-                  <rect x="60" y="215" width="145" height="125" rx="8" fill="#1E293B" stroke="#38BDF8" strokeWidth="1.8" />
-                  <text x="132" y="236" textAnchor="middle" fill="#F8FAFC" fontSize="10" fontWeight="700">1. IZMJENIČNI</text>
-                  <circle cx="95" cy="265" r="5" fill="#D97706" />
-                  <circle cx="170" cy="250" r="5" fill="#94A3B8" />
-                  <circle cx="170" cy="290" r="5" fill="#E2E8F0" />
-                  <line x1="95" y1="265" x2="170" y2={sw1State ? 250 : 290} stroke="#F59E0B" strokeWidth="3" />
+                  <rect x="60" y="215" width="145" height="125" rx="8" fill="#F4F4F2" stroke="#111111" strokeWidth="1.8" />
+                  <text x="132" y="236" textAnchor="middle" fill="#111111" fontSize="10" fontWeight="700">1. IZMJENIČNI</text>
+                  <circle cx="95" cy="265" r="5" fill="#7A4A1E" />
+                  <circle cx="170" cy="250" r="5" fill="#555555" />
+                  <circle cx="170" cy="290" r="5" fill="#111111" />
+                  <line x1="95" y1="265" x2="170" y2={sw1State ? 250 : 290} stroke="#A85400" strokeWidth="3" />
 
                   {/* Travelers into Cross Switch */}
-                  <line x1="170" y1="250" x2="310" y2="250" stroke="#94A3B8" strokeWidth="3" />
-                  <line x1="170" y1="290" x2="310" y2="290" stroke="#E2E8F0" strokeWidth="3" />
+                  <line x1="170" y1="250" x2="310" y2="250" stroke="#555555" strokeWidth="3" />
+                  <line x1="170" y1="290" x2="310" y2="290" stroke="#111111" strokeWidth="3" />
 
                   {/* Križni Prekidač */}
-                  <rect x="280" y="215" width="165" height="125" rx="8" fill="#1E293B" stroke="#F59E0B" strokeWidth="2" />
-                  <text x="362" y="236" textAnchor="middle" fill="#FDE68A" fontSize="10" fontWeight="700">2. KRIŽNI PREKIDAČ</text>
-                  <circle cx="310" cy="250" r="5" fill="#94A3B8" />
-                  <circle cx="310" cy="290" r="5" fill="#E2E8F0" />
-                  <circle cx="415" cy="250" r="5" fill="#94A3B8" />
-                  <circle cx="415" cy="290" r="5" fill="#E2E8F0" />
+                  <rect x="280" y="215" width="165" height="125" rx="8" fill="#F4F4F2" stroke="#A85400" strokeWidth="2" />
+                  <text x="362" y="236" textAnchor="middle" fill="#FFD23F" fontSize="10" fontWeight="700">2. KRIŽNI PREKIDAČ</text>
+                  <circle cx="310" cy="250" r="5" fill="#555555" />
+                  <circle cx="310" cy="290" r="5" fill="#111111" />
+                  <circle cx="415" cy="250" r="5" fill="#555555" />
+                  <circle cx="415" cy="290" r="5" fill="#111111" />
 
                   {crossState ? (
                     <>
-                      <line x1="310" y1="250" x2="415" y2="290" stroke="#38BDF8" strokeWidth="3" />
-                      <line x1="310" y1="290" x2="415" y2="250" stroke="#38BDF8" strokeWidth="3" />
+                      <line x1="310" y1="250" x2="415" y2="290" stroke="#111111" strokeWidth="3" />
+                      <line x1="310" y1="290" x2="415" y2="250" stroke="#111111" strokeWidth="3" />
                     </>
                   ) : (
                     <>
-                      <line x1="310" y1="250" x2="415" y2="250" stroke="#38BDF8" strokeWidth="3" />
-                      <line x1="310" y1="290" x2="415" y2="290" stroke="#38BDF8" strokeWidth="3" />
+                      <line x1="310" y1="250" x2="415" y2="250" stroke="#111111" strokeWidth="3" />
+                      <line x1="310" y1="290" x2="415" y2="290" stroke="#111111" strokeWidth="3" />
                     </>
                   )}
 
                   {/* Travelers from Cross Switch to Izmjenični 2 */}
-                  <line x1="415" y1="250" x2="540" y2="250" stroke="#94A3B8" strokeWidth="3" />
-                  <line x1="415" y1="290" x2="540" y2="290" stroke="#E2E8F0" strokeWidth="3" />
+                  <line x1="415" y1="250" x2="540" y2="250" stroke="#555555" strokeWidth="3" />
+                  <line x1="415" y1="290" x2="540" y2="290" stroke="#111111" strokeWidth="3" />
 
                   {/* Izmjenični 2 */}
-                  <rect x="510" y="215" width="145" height="125" rx="8" fill="#1E293B" stroke="#38BDF8" strokeWidth="1.8" />
-                  <text x="582" y="236" textAnchor="middle" fill="#F8FAFC" fontSize="10" fontWeight="700">3. IZMJENIČNI</text>
-                  <circle cx="540" cy="250" r="5" fill="#94A3B8" />
-                  <circle cx="540" cy="290" r="5" fill="#E2E8F0" />
-                  <circle cx="620" cy="270" r="5" fill="#F97316" />
-                  <line x1="620" y1="270" x2="540" y2={sw2State ? 250 : 290} stroke="#F97316" strokeWidth="3" />
+                  <rect x="510" y="215" width="145" height="125" rx="8" fill="#F4F4F2" stroke="#111111" strokeWidth="1.8" />
+                  <text x="582" y="236" textAnchor="middle" fill="#111111" fontSize="10" fontWeight="700">3. IZMJENIČNI</text>
+                  <circle cx="540" cy="250" r="5" fill="#555555" />
+                  <circle cx="540" cy="290" r="5" fill="#111111" />
+                  <circle cx="620" cy="270" r="5" fill="#C2410C" />
+                  <line x1="620" y1="270" x2="540" y2={sw2State ? 250 : 290} stroke="#C2410C" strokeWidth="3" />
 
                   <path
                     d="M 620 270 L 675 270 L 675 85 L 720 85"
                     fill="none"
-                    stroke={isLamp1On ? '#F97316' : '#475569'}
+                    stroke={isLamp1On ? '#C2410C' : '#555555'}
                     strokeWidth="3.5"
                   />
 
-                  <rect x="720" y="60" width="135" height="110" rx="10" fill="#111827" stroke={isLamp1On ? '#FACC15' : '#475569'} strokeWidth="2.5" />
-                  <circle cx="787" cy="112" r="22" fill={isLamp1On ? '#FEF08A' : '#1E293B'} />
-                  <text x="787" y="116" textAnchor="middle" fill={isLamp1On ? '#713F12' : '#94A3B8'} fontSize="11" fontWeight="700">
+                  <rect x="720" y="60" width="135" height="110" rx="10" fill="#FFFFFF" stroke={isLamp1On ? '#FACC15' : '#555555'} strokeWidth="2.5" />
+                  <circle cx="787" cy="112" r="22" fill={isLamp1On ? '#FEF08A' : '#F4F4F2'} />
+                  <text x="787" y="116" textAnchor="middle" fill={isLamp1On ? '#713F12' : '#555555'} fontSize="11" fontWeight="700">
                     {isLamp1On ? 'ON' : 'OFF'}
                   </text>
                 </g>
@@ -587,66 +596,66 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
               {/* 5. 1P SHUKO SOCKETS (JEDNOFAZNE ŠUKO UTIČNICE) */}
               {activeTab === 'socket_1p' && (
                 <g>
-                  <text x="25" y="40" fill="#94A3B8" fontSize="11" fontWeight="700">
-                    SPAJANJE ŠUKO UTIČNICA 16A / 230V (Kabel NYM-J 3×2.5 mm² u bužiru Ø20 mm)
+                  <text x="25" y="40" fill="#555555" fontSize="11" fontWeight="700">
+                    SPAJANJE ŠUKO UTIČNICA 16A / 230V (Kabel NYM-J 3×2,5 mm² u bužiru Ø20 mm)
                   </text>
 
                   {/* Main bus lines */}
-                  <line x1="30" y1="85" x2="780" y2="85" stroke="#D97706" strokeWidth="4" />
-                  <text x="35" y="75" fill="#F59E0B" fontSize="10" fontFamily="JetBrains Mono">Faza L — Smeđa (2.5 mm²) → Lijevi kontakt utičnice</text>
+                  <line x1="30" y1="85" x2="780" y2="85" stroke="#7A4A1E" strokeWidth="4" />
+                  <text x="35" y="75" fill="#A85400" fontSize="10" fontFamily="JetBrains Mono">Faza L — Smeđa (2,5 mm²) → Lijevi kontakt utičnice</text>
 
-                  <line x1="30" y1="125" x2="780" y2="125" stroke="#10B981" strokeWidth="4" strokeDasharray="6 3" />
-                  <text x="35" y="115" fill="#34D399" fontSize="10" fontFamily="JetBrains Mono">Uzemljenje PE — Žuto-zelena (2.5 mm²) → Srednja zaštitna opruga (Šuko)</text>
+                  <line x1="30" y1="125" x2="780" y2="125" stroke="#00753B" strokeWidth="4" strokeDasharray="6 3" />
+                  <text x="35" y="115" fill="#00753B" fontSize="10" fontFamily="JetBrains Mono">Uzemljenje PE — Žuto-zelena (2,5 mm²) → Srednja zaštitna opruga (Šuko)</text>
 
-                  <line x1="30" y1="165" x2="780" y2="165" stroke="#3B82F6" strokeWidth="4" />
-                  <text x="35" y="155" fill="#60A5FA" fontSize="10" fontFamily="JetBrains Mono">Nula N — Svijetloplava (2.5 mm²) → Desni kontakt utičnice</text>
+                  <line x1="30" y1="165" x2="780" y2="165" stroke="#0A5FC4" strokeWidth="4" />
+                  <text x="35" y="155" fill="#0A5FC4" fontSize="10" fontFamily="JetBrains Mono">Nula N — Svijetloplava (2,5 mm²) → Desni kontakt utičnice</text>
 
                   {/* Single Socket Box */}
-                  <rect x="160" y="220" width="210" height="140" rx="12" fill="#1E293B" stroke="#3B82F6" strokeWidth="2" />
-                  <text x="265" y="245" textAnchor="middle" fill="#F8FAFC" fontSize="12" fontWeight="700">
+                  <rect x="160" y="220" width="210" height="140" rx="12" fill="#F4F4F2" stroke="#0A5FC4" strokeWidth="2" />
+                  <text x="265" y="245" textAnchor="middle" fill="#111111" fontSize="12" fontWeight="700">
                     JEDNOSTRUKA ŠUKO UTIČNICA
                   </text>
-                  <line x1="215" y1="85" x2="215" y2="295" stroke="#D97706" strokeWidth="3.5" />
-                  <line x1="265" y1="125" x2="265" y2="295" stroke="#10B981" strokeWidth="3.5" strokeDasharray="5 3" />
-                  <line x1="315" y1="165" x2="315" y2="295" stroke="#3B82F6" strokeWidth="3.5" />
+                  <line x1="215" y1="85" x2="215" y2="295" stroke="#7A4A1E" strokeWidth="3.5" />
+                  <line x1="265" y1="125" x2="265" y2="295" stroke="#00753B" strokeWidth="3.5" strokeDasharray="5 3" />
+                  <line x1="315" y1="165" x2="315" y2="295" stroke="#0A5FC4" strokeWidth="3.5" />
 
-                  <circle cx="215" cy="295" r="7" fill="#D97706" />
-                  <circle cx="265" cy="295" r="7" fill="#10B981" />
-                  <circle cx="315" cy="295" r="7" fill="#3B82F6" />
-                  <text x="215" y="322" textAnchor="middle" fill="#F59E0B" fontSize="10" fontFamily="JetBrains Mono">L (Faza)</text>
-                  <text x="265" y="322" textAnchor="middle" fill="#34D399" fontSize="10" fontFamily="JetBrains Mono">PE (Zemlja)</text>
-                  <text x="315" y="322" textAnchor="middle" fill="#60A5FA" fontSize="10" fontFamily="JetBrains Mono">N (Nula)</text>
+                  <circle cx="215" cy="295" r="7" fill="#7A4A1E" />
+                  <circle cx="265" cy="295" r="7" fill="#00753B" />
+                  <circle cx="315" cy="295" r="7" fill="#0A5FC4" />
+                  <text x="215" y="322" textAnchor="middle" fill="#A85400" fontSize="10" fontFamily="JetBrains Mono">L (Faza)</text>
+                  <text x="265" y="322" textAnchor="middle" fill="#00753B" fontSize="10" fontFamily="JetBrains Mono">PE (Zemlja)</text>
+                  <text x="315" y="322" textAnchor="middle" fill="#0A5FC4" fontSize="10" fontFamily="JetBrains Mono">N (Nula)</text>
 
                   {/* Double Socket Box */}
-                  <rect x="470" y="220" width="270" height="140" rx="12" fill="#1E293B" stroke="#10B981" strokeWidth="2" />
-                  <text x="605" y="245" textAnchor="middle" fill="#F8FAFC" fontSize="12" fontWeight="700">
+                  <rect x="470" y="220" width="270" height="140" rx="12" fill="#F4F4F2" stroke="#00753B" strokeWidth="2" />
+                  <text x="605" y="245" textAnchor="middle" fill="#111111" fontSize="12" fontWeight="700">
                     DVOSTRUKA UTIČNICA (2 priključna mjesta)
                   </text>
-                  <line x1="540" y1="85" x2="540" y2="295" stroke="#D97706" strokeWidth="3.5" />
-                  <line x1="605" y1="125" x2="605" y2="295" stroke="#10B981" strokeWidth="3.5" strokeDasharray="5 3" />
-                  <line x1="670" y1="165" x2="670" y2="295" stroke="#3B82F6" strokeWidth="3.5" />
+                  <line x1="540" y1="85" x2="540" y2="295" stroke="#7A4A1E" strokeWidth="3.5" />
+                  <line x1="605" y1="125" x2="605" y2="295" stroke="#00753B" strokeWidth="3.5" strokeDasharray="5 3" />
+                  <line x1="670" y1="165" x2="670" y2="295" stroke="#0A5FC4" strokeWidth="3.5" />
 
-                  <circle cx="540" cy="295" r="7" fill="#D97706" />
-                  <circle cx="605" cy="295" r="7" fill="#10B981" />
-                  <circle cx="670" cy="295" r="7" fill="#3B82F6" />
-                  <text x="605" y="335" textAnchor="middle" fill="#94A3B8" fontSize="10" fontFamily="JetBrains Mono">
+                  <circle cx="540" cy="295" r="7" fill="#7A4A1E" />
+                  <circle cx="605" cy="295" r="7" fill="#00753B" />
+                  <circle cx="670" cy="295" r="7" fill="#0A5FC4" />
+                  <text x="605" y="335" textAnchor="middle" fill="#555555" fontSize="10" fontFamily="JetBrains Mono">
                     Unutarnji paralelni most (L1=L2, PE1=PE2, N1=N2)
                   </text>
                 </g>
               )}
 
-              {/* 6. 3-PHASE CONNECTION (TROFAZNI PRIKLJUČAK 5x2.5 mm²) */}
+              {/* 6. 3-PHASE CONNECTION (TROFAZNI PRIKLJUČAK 5x2,5 mm²) */}
               {activeTab === 'socket_3p' && (
                 <g>
-                  <text x="25" y="38" fill="#94A3B8" fontSize="11" fontWeight="700">
-                    TROFAZNI PRIKLJUČAK 400V / 16A (Kabel NYM-J 5×2.5 mm² u bužiru Ø25 mm za indukciju/pećnicu)
+                  <text x="25" y="38" fill="#555555" fontSize="11" fontWeight="700">
+                    TROFAZNI PRIKLJUČAK 400V / 16A (Kabel NYM-J 5×2,5 mm² u bužiru Ø25 mm za indukciju/pećnicu)
                   </text>
                   {[
-                    { y: 75, color: '#D97706', label: 'L1 — Faza 1 (Smeđa)', xTerm: 240 },
+                    { y: 75, color: '#7A4A1E', label: 'L1 — Faza 1 (Smeđa)', xTerm: 240 },
                     { y: 105, color: '#F43F5E', label: 'L2 — Faza 2 (Crna)', xTerm: 330 },
                     { y: 135, color: '#A855F7', label: 'L3 — Faza 3 (Siva)', xTerm: 420 },
-                    { y: 165, color: '#3B82F6', label: 'N — Nula (Plava)', xTerm: 510 },
-                    { y: 195, color: '#10B981', label: 'PE — Zaštitno uzemljenje (Žuto-zelena)', xTerm: 600 },
+                    { y: 165, color: '#0A5FC4', label: 'N — Nula (Plava)', xTerm: 510 },
+                    { y: 195, color: '#00753B', label: 'PE — Zaštitno uzemljenje (Žuto-zelena)', xTerm: 600 },
                   ].map((w, i) => (
                     <g key={i}>
                       <line
@@ -667,14 +676,14 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                         strokeWidth="3.5"
                         strokeDasharray={i === 4 ? '6 3' : undefined}
                       />
-                      <text x="35" y={w.y - 6} fill="#E2E8F0" fontSize="9.5" fontFamily="JetBrains Mono">
+                      <text x="35" y={w.y - 6} fill="#111111" fontSize="9.5" fontFamily="JetBrains Mono">
                         {w.label}
                       </text>
                       <circle cx={w.xTerm} cy="295" r="7" fill={w.color} />
                     </g>
                   ))}
-                  <rect x="190" y="245" width="465" height="110" rx="12" fill="none" stroke="#F59E0B" strokeWidth="2" />
-                  <text x="422" y="335" textAnchor="middle" fill="#F8FAFC" fontSize="12" fontWeight="700">
+                  <rect x="190" y="245" width="465" height="110" rx="12" fill="none" stroke="#A85400" strokeWidth="2" />
+                  <text x="422" y="335" textAnchor="middle" fill="#111111" fontSize="12" fontWeight="700">
                     TROFAZNA PRIKLJUČNICA (5-POLNA STEZALJKA: L1 · L2 · L3 · N · PE)
                   </text>
                 </g>
@@ -684,9 +693,9 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
 
           {/* Legend & Selected Node Segment Details */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="p-4 bg-[#111827] border border-slate-800 rounded-lg space-y-2.5">
-              <h3 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                <Info className="w-4 h-4 text-sky-400" />
+            <div className="p-4 bg-paper border border-line rounded-lg space-y-2.5">
+              <h3 className="text-xs font-bold text-ink flex items-center gap-1.5">
+                <Info className="w-4 h-4 text-ink" />
                 Standard oznaka i boja vodiča (HRN HD 308 S2 / IEC 60446)
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
@@ -695,17 +704,17 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   .map(([key, m]) => (
                     <div
                       key={key}
-                      className="flex items-center gap-2.5 p-2 rounded bg-slate-900/80 border border-slate-800/80"
+                      className="flex items-center gap-2.5 p-2 rounded bg-paper/80 border border-line/80"
                     >
                       <span
                         className="w-3.5 h-3.5 rounded-sm shrink-0"
                         style={{ backgroundColor: m.colorHex }}
                       />
                       <div className="min-w-0">
-                        <div className="font-mono font-semibold text-slate-200 truncate">
+                        <div className=" font-semibold text-ink truncate">
                           {m.label}
                         </div>
-                        <div className="text-[11px] text-slate-400 truncate">
+                        <div className="text-[11px] text-muted truncate">
                           {m.iecColorName}
                         </div>
                       </div>
@@ -714,9 +723,9 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
               </div>
             </div>
 
-            <div className="p-4 bg-[#111827] border border-slate-800 rounded-lg space-y-2.5">
-              <h3 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+            <div className="p-4 bg-paper border border-line rounded-lg space-y-2.5">
+              <h3 className="text-xs font-bold text-ink flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-ok" />
                 Specifikacija bužira i vodiča za odabrani element
               </h3>
               {node && nodeSegments.length > 0 ? (
@@ -724,22 +733,22 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   {nodeSegments.map((seg) => (
                     <div
                       key={seg.id}
-                      className="p-2.5 rounded bg-slate-900 border border-slate-800 text-xs space-y-1"
+                      className="p-2.5 rounded bg-paper border border-line text-xs space-y-1"
                     >
-                      <div className="flex items-center justify-between font-mono">
-                        <span className="text-sky-400 font-semibold">
+                      <div className="flex items-center justify-between ">
+                        <span className="text-ink font-semibold">
                           {seg.cableSpec} · Bužir Ø{seg.conduitDiameterMm} mm
                         </span>
-                        <span className="text-slate-200 font-bold">
+                        <span className="text-ink font-bold">
                           Dužina: {seg.lengthMeters.toFixed(2)} m
                         </span>
                       </div>
-                      <p className="text-slate-400 text-[11px]">{seg.description}</p>
-                      <div className="flex flex-wrap gap-1.5 pt-1 font-mono text-[11px]">
+                      <p className="text-muted text-[11px]">{seg.description}</p>
+                      <div className="flex flex-wrap gap-1.5 pt-1  text-[11px]">
                         {seg.conductors.map((c, i) => (
                           <span
                             key={i}
-                            className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-200"
+                            className="px-2 py-0.5 rounded bg-slate-950 border border-line text-ink"
                             style={{ borderLeft: `3px solid ${CONDUCTOR_META[c]?.colorHex || '#fff'}` }}
                           >
                             {CONDUCTOR_META[c]?.label || c}
@@ -750,20 +759,20 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   ))}
                 </div>
               ) : (
-                <div className="text-xs text-slate-400 space-y-1.5 leading-relaxed">
+                <div className="text-xs text-muted space-y-1.5 leading-relaxed">
                   <p>
                     • <strong>Bužir Ø16 mm</strong>: Za rasvjetne i prekidačke vodove
-                    presjeka <code className="font-mono text-slate-200">3×1.5 mm²</code>.
+                    presjeka <code className=" text-ink">3×1,5 mm²</code>.
                   </p>
                   <p>
                     • <strong>Bužir Ø20 mm</strong>: Za strujne krugove utičnica{' '}
-                    <code className="font-mono text-slate-200">3×2.5 mm²</code> te
+                    <code className=" text-ink">3×2,5 mm²</code> te
                     izmjenične/križne spojeve{' '}
-                    <code className="font-mono text-slate-200">5×1.5 mm²</code>.
+                    <code className=" text-ink">5×1,5 mm²</code>.
                   </p>
                   <p>
                     • <strong>Bužir Ø25 mm</strong>: Za trofazne vodove{' '}
-                    <code className="font-mono text-slate-200">5×2.5 mm²</code> i glavne
+                    <code className=" text-ink">5×2,5 mm²</code> i glavne
                     dovode u razvodne kutije.
                   </p>
                 </div>
