@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { ChevronDown, ChevronRight, X } from 'lucide-react';
 import { formatMeters, parseDecimal, roundMm } from '../engine/geometry';
 
 interface NumberFieldProps {
@@ -164,4 +164,67 @@ export function useIsCompact(): boolean {
     return () => media.removeEventListener('change', onChange);
   }, []);
   return compact;
+}
+
+const COLLAPSE_KEY = 'elektroplan:collapsed-sections';
+
+function readCollapsed(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(COLLAPSE_KEY) ?? '{}');
+  } catch {
+    return {};
+  }
+}
+
+/** A panel category the user can fold away; its header and summary always stay visible. */
+export function CollapsibleSection({
+  id,
+  title,
+  summary,
+  action,
+  children,
+}: {
+  id: string;
+  title: string;
+  summary?: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const [collapsed, setCollapsed] = useState(() => readCollapsed()[id] === true);
+  const toggle = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    try {
+      localStorage.setItem(COLLAPSE_KEY, JSON.stringify({ ...readCollapsed(), [id]: next }));
+    } catch {
+      // Folding still works for this session.
+    }
+  };
+  const Icon = collapsed ? ChevronRight : ChevronDown;
+  return (
+    <section>
+      <div className="flex items-center gap-1">
+        <button
+          aria-expanded={!collapsed}
+          data-testid={`sekcija-${id}`}
+          className={`flex-1 min-w-0 flex items-center gap-1.5 px-2 py-1.5 rounded text-left border ${
+            collapsed
+              ? 'bg-paper border-line hover:border-ink'
+              : 'border-transparent hover:bg-desk'
+          }`}
+          onClick={toggle}
+        >
+          <Icon className="w-4 h-4 shrink-0" />
+          <span className="section-title truncate">{title}</span>
+          {summary && (
+            <span className="ml-auto pl-2 text-[12px] text-muted tabular-nums truncate shrink-0 max-w-[55%]">
+              {summary}
+            </span>
+          )}
+        </button>
+        {!collapsed && action}
+      </div>
+      {!collapsed && <div className="pt-1.5 space-y-2">{children}</div>}
+    </section>
+  );
 }

@@ -29,14 +29,14 @@ export function BomContent({ room, nodes, appliances, circuitAnalyses, bom }: Bo
   const totalKw = circuitAnalyses.reduce((sum, c) => sum + c.totalPowerWatts, 0) / 1000;
   return (
     <div className="space-y-5 text-[12.5px]">
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-4 print:grid-cols-4 gap-3">
         <Stat label="Prostorija" value={`${formatMeters(room.length)} × ${formatMeters(room.width)} × ${formatMeters(room.height)} m`} />
         <Stat label="Kabeli, stvarna trasa" value={`${formatNumber(bom.totalRouteLengthMeters, 1)} m`} />
         <Stat label="Kabeli, za nabavu" value={`${bom.totalPurchaseCableMeters} m`} />
         <Stat label="Instalirana snaga" value={`${formatNumber(totalKw, 2)} kW`} />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-3 print:grid-cols-3 gap-5">
         <div>
           <h3 className="section-title mb-1">Kabeli</h3>
           <table className="w-full">

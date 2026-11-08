@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { X, Zap, CheckCircle2, Info } from 'lucide-react';
 import { CONDUCTOR_META, ELEMENT_CATALOG } from '../data/presets';
+import { formatMeters } from '../engine/geometry';
 import {
   ElectricalCircuit,
   ElectricalNode,
@@ -88,7 +89,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
             <p className="text-xs text-muted mt-0.5">
               {node
                 ? `Odabrani element: ${node.label} (${ELEMENT_CATALOG[node.category]?.name}) · Krug: ${circuit?.code || 'SK'}`
-                : 'Prikaz ožičenja prekidača i utičnica prema normi IEC 60446'}
+                : 'Prikaz ožičenja prekidača i utičnica prema normi IEC 60445'}
             </p>
           </div>
           <button
@@ -235,7 +236,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   {/* Conduit downward to Switch */}
                   <rect x="265" y="195" width="95" height="24" rx="4" fill="#F4F4F2" stroke="#555555" />
                   <text x="312" y="211" textAnchor="middle" fill="#222222" fontSize="9.5" fontFamily="JetBrains Mono">
-                    Bužir Ø16 (3×1.5)
+                    Bužir Ø16 (3×1,5)
                   </text>
 
                   {/* Phase down to switch L terminal */}
@@ -329,11 +330,15 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   <line x1="25" y1="75" x2="275" y2="75" stroke="#7A4A1E" strokeWidth="3.5" />
                   <line x1="25" y1="110" x2="660" y2="110" stroke="#0A5FC4" strokeWidth="3.5" />
                   <line x1="25" y1="145" x2="660" y2="145" stroke="#00753B" strokeWidth="3.5" strokeDasharray="6 3" />
+                  <path d="M 620 110 L 620 240 L 660 240" fill="none" stroke="#0A5FC4" strokeWidth="3.5" />
+                  <path d="M 640 145 L 640 262 L 660 262" fill="none" stroke="#00753B" strokeWidth="3.5" strokeDasharray="6 3" />
+                  <circle cx="620" cy="110" r="5" fill="#0A5FC4" />
+                  <circle cx="640" cy="145" r="5" fill="#00753B" />
 
                   {/* Junction box */}
                   <rect x="220" y="40" width="250" height="140" rx="10" fill="#FFFFFF" stroke="#555555" strokeWidth="2" />
                   <text x="345" y="60" textAnchor="middle" fill="#111111" fontSize="12" fontWeight="700">
-                    RAZVODNA KUTIJA (5×1,5 mm² prema P2)
+                    RAZVODNA KUTIJA (4×1,5 mm² prema P2)
                   </text>
 
                   {/* Phase down to switch L */}
@@ -368,7 +373,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
 
                   {/* Lamp 1 */}
                   <rect x="660" y="55" width="180" height="105" rx="10" fill="#FFFFFF" stroke={isLamp1On ? '#FACC15' : '#555555'} strokeWidth="2" />
-                  <text x="750" y="105" textAnchor="middle" fill={isLamp1On ? '#FEF08A' : '#555555'} fontSize="13" fontWeight="700">
+                  <text x="750" y="105" textAnchor="middle" fill="#111111" fontSize="13" fontWeight="700">
                     GRUPA SVJETALA 1: {isLamp1On ? 'UKLJ' : 'ISKLJ'}
                   </text>
                   <text x="750" y="135" textAnchor="middle" fill="#555555" fontSize="10" fontFamily="JetBrains Mono">
@@ -377,7 +382,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
 
                   {/* Lamp 2 */}
                   <rect x="660" y="185" width="180" height="105" rx="10" fill="#FFFFFF" stroke={isLamp2On ? '#6D35B8' : '#555555'} strokeWidth="2" />
-                  <text x="750" y="235" textAnchor="middle" fill={isLamp2On ? '#FBCFE8' : '#555555'} fontSize="13" fontWeight="700">
+                  <text x="750" y="235" textAnchor="middle" fill="#111111" fontSize="13" fontWeight="700">
                     GRUPA SVJETALA 2: {isLamp2On ? 'UKLJ' : 'ISKLJ'}
                   </text>
                   <text x="750" y="265" textAnchor="middle" fill="#555555" fontSize="10" fontFamily="JetBrains Mono">
@@ -390,7 +395,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
               {activeTab === 'switch_two_way' && (
                 <g>
                   <text x="20" y="36" fill="#555555" fontSize="11" fontWeight="700">
-                    IZMJENIČNI SPOJ (Upravljanje rasvjetom s 2 mjesta — Bužir Ø20 / NYM-J 5×1,5 mm²)
+                    IZMJENIČNI SPOJ (Upravljanje rasvjetom s 2 mjesta — Bužir Ø20 / NYM-J 4×1,5 mm² po prekidaču)
                   </text>
 
                   {/* Supply L, N, PE */}
@@ -548,7 +553,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
 
                   {/* Križni Prekidač */}
                   <rect x="280" y="215" width="165" height="125" rx="8" fill="#F4F4F2" stroke="#A85400" strokeWidth="2" />
-                  <text x="362" y="236" textAnchor="middle" fill="#FFD23F" fontSize="10" fontWeight="700">2. KRIŽNI PREKIDAČ</text>
+                  <text x="362" y="236" textAnchor="middle" fill="#111111" fontSize="10" fontWeight="700">2. KRIŽNI PREKIDAČ</text>
                   <circle cx="310" cy="250" r="5" fill="#555555" />
                   <circle cx="310" cy="290" r="5" fill="#111111" />
                   <circle cx="415" cy="250" r="5" fill="#555555" />
@@ -602,13 +607,13 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
 
                   {/* Main bus lines */}
                   <line x1="30" y1="85" x2="780" y2="85" stroke="#7A4A1E" strokeWidth="4" />
-                  <text x="35" y="75" fill="#A85400" fontSize="10" fontFamily="JetBrains Mono">Faza L — Smeđa (2,5 mm²) → Lijevi kontakt utičnice</text>
+                  <text x="35" y="75" fill="#A85400" fontSize="10" fontFamily="JetBrains Mono">Faza L — Smeđa (2,5 mm²) → stezaljka L</text>
 
                   <line x1="30" y1="125" x2="780" y2="125" stroke="#00753B" strokeWidth="4" strokeDasharray="6 3" />
-                  <text x="35" y="115" fill="#00753B" fontSize="10" fontFamily="JetBrains Mono">Uzemljenje PE — Žuto-zelena (2,5 mm²) → Srednja zaštitna opruga (Šuko)</text>
+                  <text x="35" y="115" fill="#00753B" fontSize="10" fontFamily="JetBrains Mono">Uzemljenje PE — Žuto-zelena (2,5 mm²) → stezaljka PE (zaštitni kontakti)</text>
 
                   <line x1="30" y1="165" x2="780" y2="165" stroke="#0A5FC4" strokeWidth="4" />
-                  <text x="35" y="155" fill="#0A5FC4" fontSize="10" fontFamily="JetBrains Mono">Nula N — Svijetloplava (2,5 mm²) → Desni kontakt utičnice</text>
+                  <text x="35" y="155" fill="#0A5FC4" fontSize="10" fontFamily="JetBrains Mono">Nula N — Plava (2,5 mm²) → stezaljka N</text>
 
                   {/* Single Socket Box */}
                   <rect x="160" y="220" width="210" height="140" rx="12" fill="#F4F4F2" stroke="#0A5FC4" strokeWidth="2" />
@@ -652,8 +657,8 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   </text>
                   {[
                     { y: 75, color: '#7A4A1E', label: 'L1 — Faza 1 (Smeđa)', xTerm: 240 },
-                    { y: 105, color: '#F43F5E', label: 'L2 — Faza 2 (Crna)', xTerm: 330 },
-                    { y: 135, color: '#A855F7', label: 'L3 — Faza 3 (Siva)', xTerm: 420 },
+                    { y: 105, color: '#111111', label: 'L2 — Faza 2 (Crna)', xTerm: 330 },
+                    { y: 135, color: '#6B6B6B', label: 'L3 — Faza 3 (Siva)', xTerm: 420 },
                     { y: 165, color: '#0A5FC4', label: 'N — Nula (Plava)', xTerm: 510 },
                     { y: 195, color: '#00753B', label: 'PE — Zaštitno uzemljenje (Žuto-zelena)', xTerm: 600 },
                   ].map((w, i) => (
@@ -696,11 +701,11 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
             <div className="p-4 bg-paper border border-line rounded-lg space-y-2.5">
               <h3 className="text-xs font-bold text-ink flex items-center gap-1.5">
                 <Info className="w-4 h-4 text-ink" />
-                Standard oznaka i boja vodiča (HRN HD 308 S2 / IEC 60446)
+                Boje vodiča (HRN HD 308 S2 / IEC 60445)
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
                 {Object.entries(CONDUCTOR_META)
-                  .slice(0, 6)
+                  .filter(([key]) => !['L1', 'L2', 'L3'].includes(key))
                   .map(([key, m]) => (
                     <div
                       key={key}
@@ -740,7 +745,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                           {seg.cableSpec} · Bužir Ø{seg.conduitDiameterMm} mm
                         </span>
                         <span className="text-ink font-bold">
-                          Dužina: {seg.lengthMeters.toFixed(2)} m
+                          Dužina: {formatMeters(seg.lengthMeters)} m
                         </span>
                       </div>
                       <p className="text-muted text-[11px]">{seg.description}</p>
@@ -748,7 +753,7 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                         {seg.conductors.map((c, i) => (
                           <span
                             key={i}
-                            className="px-2 py-0.5 rounded bg-slate-950 border border-line text-ink"
+                            className="px-2 py-0.5 rounded bg-paper border border-line text-ink"
                             style={{ borderLeft: `3px solid ${CONDUCTOR_META[c]?.colorHex || '#fff'}` }}
                           >
                             {CONDUCTOR_META[c]?.label || c}
@@ -767,7 +772,8 @@ export const WiringSchematicModal: React.FC<WiringSchematicModalProps> = ({
                   <p>
                     • <strong>Bužir Ø20 mm</strong>: Za strujne krugove utičnica{' '}
                     <code className=" text-ink">3×2,5 mm²</code> te
-                    izmjenične/križne spojeve{' '}
+                    izmjenične spojeve{' '}
+                    <code className=" text-ink">4×1,5 mm²</code> i križne{' '}
                     <code className=" text-ink">5×1,5 mm²</code>.
                   </p>
                   <p>

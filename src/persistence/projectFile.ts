@@ -1,4 +1,5 @@
 import { ELEMENT_CATALOG } from '../data/presets';
+import { defaultFurnitureDepth } from '../engine/furniture';
 import { ElementCategory, ProjectData } from '../types/electrical';
 
 export const SCHEMA_VERSION = 1;
@@ -6,6 +7,17 @@ export const FILE_FORMAT = 'elektroplan';
 export const FILE_EXTENSION = '.elektroplan.json';
 
 export class ProjectFileError extends Error {}
+
+/** Projects saved before furniture existed simply have none. */
+export function normalizeProjectData(data: ProjectData): ProjectData {
+  return {
+    ...data,
+    furniture: (data.furniture ?? []).map((f) => ({
+      ...f,
+      depth: f.depth ?? defaultFurnitureDepth(f.name),
+    })),
+  };
+}
 
 export function serializeProject(name: string, data: ProjectData): string {
   return JSON.stringify(
@@ -35,7 +47,7 @@ function assertProjectData(value: unknown): asserts value is ProjectData {
     throw new ProjectFileError(INVALID);
   };
   if (!isObject(value)) return fail();
-  const { room, openings, nodes, circuits, appliances } = value;
+  const { room, openings, nodes, circuits, appliances, furniture } = value;
   if (
     !isObject(room) ||
     !isFiniteNumber(room.length) ||
@@ -61,6 +73,25 @@ function assertProjectData(value: unknown): asserts value is ProjectData {
       !isFiniteNumber(o.sillHeight)
     ) {
       return fail();
+    }
+  }
+
+  if (furniture !== undefined) {
+    if (!Array.isArray(furniture)) return fail();
+    for (const f of furniture) {
+      if (
+        !isObject(f) ||
+        typeof f.id !== 'string' ||
+        typeof f.name !== 'string' ||
+        !WALLS.has(f.wall as string) ||
+        !isFiniteNumber(f.offsetFromLeft) ||
+        !isFiniteNumber(f.width) ||
+        !isFiniteNumber(f.height) ||
+        !isFiniteNumber(f.bottom) ||
+        (f.depth !== undefined && !isFiniteNumber(f.depth))
+      ) {
+        return fail();
+      }
     }
   }
 
@@ -127,6 +158,6 @@ export function parseProjectFile(text: string): { name: string; data: ProjectDat
   assertProjectData(parsed.data);
   return {
     name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name : 'Uvezeni projekt',
-    data: parsed.data,
+    data: normalizeProjectData(parsed.data),
   };
 }

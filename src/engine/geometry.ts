@@ -117,6 +117,7 @@ export const ELEMENT_FOOTPRINT: Record<
   socket_single: { width: 0.08, height: 0.08, shape: 'rect' },
   socket_double: { width: 0.15, height: 0.08, shape: 'rect' },
   socket_shuko_3p: { width: 0.1, height: 0.1, shape: 'rect' },
+  socket_fixed_1p: { width: 0.1, height: 0.1, shape: 'rect' },
   switch_single: { width: 0.08, height: 0.08, shape: 'rect' },
   switch_double: { width: 0.08, height: 0.08, shape: 'rect' },
   switch_two_way: { width: 0.08, height: 0.08, shape: 'rect' },
@@ -186,7 +187,9 @@ export type Box = [x: number, y: number, width: number, height: number];
 
 export function placeLabels(
   requests: LabelRequest[],
-  obstacles: Box[]
+  obstacles: Box[],
+  /** Things a label should avoid but may touch when nothing else fits, e.g. cables. */
+  softObstacles: Box[] = []
 ): Map<string, { x: number; y: number }> {
   const placed: Box[] = [...obstacles];
   const anchors: Box[] = requests.map((r) => [
@@ -203,35 +206,48 @@ export function placeLabels(
 
   const result = new Map<string, { x: number; y: number }>();
   for (const r of requests) {
-    const { labelWidth: w, labelHeight: h, gap: m } = r;
+    const { labelWidth: w, labelHeight: h, gap } = r;
     const halfW = r.anchorWidth / 2;
     const halfH = r.anchorHeight / 2;
-    const candidates: [number, number][] = [
-      [r.x - w / 2, r.y - halfH - h - m],
-      [r.x - w / 2, r.y + halfH + m],
-      [r.x + halfW + m, r.y - h / 2],
-      [r.x - halfW - w - m, r.y - h / 2],
-      [r.x + halfW + m, r.y - h - m],
-      [r.x - halfW - w - m, r.y + m],
-      [r.x + halfW + m, r.y + m],
-      [r.x - halfW - w - m, r.y - h - m],
-    ];
-    const free = candidates.find(([x, y]) => {
-      const box: Box = [x, y, w, h];
-      const inside =
-        x >= r.bounds.x + 1 &&
-        y >= r.bounds.y + 1 &&
-        x + w <= r.bounds.x + r.bounds.width - 1 &&
-        y + h <= r.bounds.y + r.bounds.height - 1;
-      return (
-        inside &&
-        !placed.some((p) => overlaps(box, p, 2)) &&
-        !anchors.some((a) => overlaps(box, a, 0))
-      );
-    });
-    const [x, y] = free ?? candidates[0];
-    placed.push([x, y, w, h]);
-    result.set(r.id, { x, y });
+    const step = h * 0.6;
+    let chosen: [number, number] = [r.x + halfW + gap, r.y - h / 2];
+    let bestScore = Infinity;
+
+    for (let ring = 0; ring < 9; ring++) {
+      const g = gap + ring * step;
+      const candidates: [number, number][] = [
+        [r.x + halfW + g, r.y - h / 2],
+        [r.x - halfW - w - g, r.y - h / 2],
+        [r.x + halfW + g, r.y + g * 0.5],
+        [r.x - halfW - w - g, r.y + g * 0.5],
+        [r.x + halfW + g, r.y - h - g * 0.5],
+        [r.x - halfW - w - g, r.y - h - g * 0.5],
+        [r.x - w / 2, r.y + halfH + g],
+        [r.x - w / 2, r.y - halfH - h - g],
+      ];
+      for (const [x, y] of candidates) {
+        const inside =
+          x >= r.bounds.x + 1 &&
+          y >= r.bounds.y + 1 &&
+          x + w <= r.bounds.x + r.bounds.width - 1 &&
+          y + h <= r.bounds.y + r.bounds.height - 1;
+        if (!inside) continue;
+        const box: Box = [x, y, w, h];
+        const hard =
+          placed.filter((p) => overlaps(box, p, 2)).length +
+          anchors.filter((a) => overlaps(box, a, 0)).length;
+        const soft = softObstacles.filter((p) => overlaps(box, p, 1)).length;
+        const score = hard * 1000 + soft * 50 + ring;
+        if (score < bestScore) {
+          bestScore = score;
+          chosen = [x, y];
+        }
+      }
+      if (bestScore <= ring) break;
+    }
+
+    placed.push([chosen[0], chosen[1], w, h]);
+    result.set(r.id, { x: chosen[0], y: chosen[1] });
   }
   return result;
 }

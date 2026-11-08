@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { Maximize, ZoomIn, ZoomOut } from 'lucide-react';
+import { Lock, Maximize, ZoomIn, ZoomOut } from 'lucide-react';
 import { CONDUCTOR_META, WALL_META } from '../data/presets';
 import {
   computeSnapAndDimensions,
@@ -13,6 +13,9 @@ import {
   getPrimaryJunctionBoxWall,
   SnapResult,
 } from '../engine/electricalEngine';
+import { computeFurnitureDrag } from '../engine/furniture';
+import { computeOpeningDrag, OpeningDragResult } from '../engine/openingDrag';
+import { applianceIcon } from './applianceIcons';
 import {
   Box,
   ceilingToView,
@@ -26,9 +29,11 @@ import {
   viewToCeiling,
 } from '../engine/geometry';
 import {
+  ApplianceItem,
   ElectricalCircuit,
   ElectricalNode,
   ElementCategory,
+  FurnitureItem,
   RoomDimensions,
   RoutedSegment,
   SurfaceId,
@@ -41,6 +46,8 @@ export interface CanvasLayers {
   zones: boolean;
   dimensions: boolean;
   snap: boolean;
+  appliances: boolean;
+  furniture: boolean;
 }
 
 export interface CanvasHandle {
@@ -51,6 +58,9 @@ export interface CanvasHandle {
     clientY: number
   ) => void;
   clearPreview: () => void;
+  /** Highlights the socket under the pointer and returns its id. */
+  highlightSocketAt: (clientX: number, clientY: number) => string | null;
+  clearSocketHighlight: () => void;
 }
 
 interface Props {
@@ -59,6 +69,9 @@ interface Props {
   nodes: ElectricalNode[];
   circuits: ElectricalCircuit[];
   segments: RoutedSegment[];
+  appliances: ApplianceItem[];
+  furniture: FurnitureItem[];
+  openingsEditable: boolean;
   activeSurface: SurfaceId;
   layoutMode: 'strip_all' | 'single_surface';
   layers: CanvasLayers;
@@ -70,6 +83,8 @@ interface Props {
   onMoveNode: (id: string, surface: SurfaceId, x: number, y: number, dragKey: string) => void;
   onDropNewNode: (category: ElementCategory, surface: SurfaceId, x: number, y: number) => void;
   onBlockedDrop: (message: string) => void;
+  onMoveOpening: (id: string, wall: WallId, offset: number, sill: number, dragKey: string) => void;
+  onMoveFurniture: (id: string, wall: WallId, offset: number, bottom: number, dragKey: string) => void;
 }
 
 interface SurfaceRect {
@@ -88,6 +103,9 @@ const GRID = '#E2E2DE';
 const OPENING = '#ECECE8';
 const OPENING_LINE = '#333333';
 const SELECT = '#C2007A';
+const FURNITURE = '#EFEFEC';
+const FURNITURE_LINE = '#C4C4BF';
+const FURNITURE_TEXT = '#9A9A95';
 const ERROR = '#B3261E';
 const PAD_X = 34;
 const PAD_TOP = 14;
@@ -236,6 +254,9 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
     nodes,
     circuits,
     segments,
+    appliances,
+    furniture,
+    openingsEditable,
     activeSurface,
     layoutMode,
     layers,
@@ -247,19 +268,50 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
     onMoveNode,
     onDropNewNode,
     onBlockedDrop,
+    onMoveOpening,
+    onMoveFurniture,
   },
   ref
 ) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [viewport, setViewport] = useState({ width: 800, height: 500 });
-  const [zoom, setZoom] = useState(1);
+  const [view, setView] = useState<{ zoom: number; panX: number; panY: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+  const [socketHighlight, setSocketHighlight] = useState<string | null>(null);
+  const [openingDrag, setOpeningDrag] = useState<{
+    kind: 'opening' | 'furniture';
+    id: string;
+    key: string;
+    grabX: number;
+    grabY: number;
+    result: OpeningDragResult | null;
+  } | null>(null);
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const panStart = useRef<{ x: number; y: number; panX: number; panY: number; moved: boolean } | null>(null);
+  const pinchDistance = useRef<number | null>(null);
+  const didPan = useRef(false);
   const [dragging, setDragging] = useState<{ id: string; key: string } | null>(null);
   const [snapPreview, setSnapPreview] = useState<{
     surface: SurfaceId;
     snap: SnapResult;
   } | null>(null);
   const dragCounter = useRef(0);
+
+  useEffect(() => {
+    const element = scrollerRef.current;
+    if (!element) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      zoomAtRef.current(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015));
+    };
+    element.addEventListener('wheel', onWheel, { passive: false });
+    return () => element.removeEventListener('wheel', onWheel);
+  }, []);
+
+  useEffect(() => {
+    setView(null);
+  }, [layoutMode, layoutMode === 'single_surface' ? activeSurface : '']);
 
   useEffect(() => {
     const element = scrollerRef.current;
@@ -286,9 +338,94 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
       (viewport.height - PAD_TOP - PAD_BOTTOM) / heightM
     )
   );
+  const zoom = view?.zoom ?? 1;
   const scale = fitScale * zoom;
   const svgWidth = widthM * scale + PAD_X * 2;
   const svgHeight = heightM * scale + PAD_TOP + PAD_BOTTOM;
+  const panX = view ? view.panX : (viewport.width - svgWidth) / 2;
+  const panY = view ? view.panY : (viewport.height - svgHeight) / 2;
+
+  const clampPan = (x: number, y: number, w: number, h: number) => ({
+    panX: Math.max(80 - w, Math.min(viewport.width - 80, x)),
+    panY: Math.max(80 - h, Math.min(viewport.height - 80, y)),
+  });
+
+  /** Changes zoom keeping the point under the given screen position still. */
+  const zoomAt = (clientX: number, clientY: number, factor: number) => {
+    const bounds = scrollerRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const nextZoom = Math.max(0.5, Math.min(12, zoom * factor));
+    const nextScale = fitScale * nextZoom;
+    const ox = clientX - bounds.left;
+    const oy = clientY - bounds.top;
+    const worldX = (ox - panX - PAD_X) / scale;
+    const worldY = (oy - panY - PAD_TOP) / scale;
+    setView({
+      zoom: nextZoom,
+      ...clampPan(
+        ox - PAD_X - worldX * nextScale,
+        oy - PAD_TOP - worldY * nextScale,
+        widthM * nextScale + PAD_X * 2,
+        heightM * nextScale + PAD_TOP + PAD_BOTTOM
+      ),
+    });
+  };
+  const zoomAtRef = useRef(zoomAt);
+  zoomAtRef.current = zoomAt;
+
+  const zoomFromCenter = (factor: number) => {
+    const bounds = scrollerRef.current?.getBoundingClientRect();
+    if (bounds) zoomAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, factor);
+  };
+
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.current.size === 1) {
+      panStart.current = { x: e.clientX, y: e.clientY, panX, panY, moved: false };
+    } else if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      pinchDistance.current = Math.hypot(a.x - b.x, a.y - b.y);
+      panStart.current = null;
+    }
+  };
+
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.current.size === 2 && pinchDistance.current) {
+      const [a, b] = [...pointers.current.values()];
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, distance / pinchDistance.current);
+      pinchDistance.current = distance;
+      return;
+    }
+    const start = panStart.current;
+    if (!start) return;
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    if (!start.moved && Math.hypot(dx, dy) > 3) {
+      start.moved = true;
+      scrollerRef.current?.setPointerCapture(e.pointerId);
+      setPanning(true);
+    }
+    if (start.moved) {
+      setView({ zoom, ...clampPan(start.panX + dx, start.panY + dy, svgWidth, svgHeight) });
+    }
+  };
+
+  const handleCanvasPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    pointers.current.delete(e.pointerId);
+    pinchDistance.current = null;
+    if (panStart.current?.moved) {
+      didPan.current = true;
+      window.setTimeout(() => {
+        didPan.current = false;
+      });
+    }
+    panStart.current = null;
+    setPanning(false);
+  };
 
   const rectOf = (surface: SurfaceId) => rects.find((r) => r.surface === surface);
   const pxRect = (r: SurfaceRect) => ({
@@ -359,6 +496,25 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
   useImperativeHandle(ref, () => ({
     previewPaletteDrop: (x, y) => setSnapPreview(snapAt(x, y)),
     clearPreview: () => setSnapPreview(null),
+    highlightSocketAt: (clientX, clientY) => {
+      const bounds = svgRef.current?.getBoundingClientRect();
+      if (!bounds) return null;
+      let found: string | null = null;
+      let nearest = 40;
+      for (const n of nodes.filter((item) => item.category.startsWith('socket_'))) {
+        const r = rectOf(n.surface);
+        if (!r) continue;
+        const p = storedToPx(r, n);
+        const distance = Math.hypot(clientX - bounds.left - p.x, clientY - bounds.top - p.y);
+        if (distance < nearest) {
+          nearest = distance;
+          found = n.id;
+        }
+      }
+      setSocketHighlight(found);
+      return found;
+    },
+    clearSocketHighlight: () => setSocketHighlight(null),
     commitPaletteDrop: (category, x, y) => {
       const result = snapAt(x, y);
       setSnapPreview(null);
@@ -372,6 +528,34 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
   }));
 
   const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (openingDrag) {
+      const hit = pointerToStored(e.clientX, e.clientY);
+      if (hit && hit.surface !== 'ceiling') {
+        const rawX = hit.x - openingDrag.grabX;
+        const rawY = hit.y - openingDrag.grabY;
+        const opening = openings.find((o) => o.id === openingDrag.id);
+        const piece = furniture.find((f) => f.id === openingDrag.id);
+        const result =
+          openingDrag.kind === 'opening' && opening
+            ? computeOpeningDrag(opening, hit.surface, rawX, rawY, room, openings, nodes, furniture)
+            : piece
+            ? computeFurnitureDrag(piece, hit.surface, rawX, rawY, room, furniture, openings)
+            : null;
+        if (result) {
+          setOpeningDrag({ ...openingDrag, result });
+          if (result.valid) {
+            (openingDrag.kind === 'opening' ? onMoveOpening : onMoveFurniture)(
+              openingDrag.id,
+              result.wall,
+              result.offsetFromLeft,
+              result.sillHeight,
+              openingDrag.key
+            );
+          }
+        }
+      }
+      return;
+    }
     if (!dragging) return;
     const result = snapAt(e.clientX, e.clientY, dragging.id);
     setSnapPreview(result);
@@ -381,6 +565,7 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
   };
 
   const endDrag = () => {
+    setOpeningDrag(null);
     setDragging(null);
     setSnapPreview(null);
   };
@@ -394,6 +579,19 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
   const colorOf = (id: string) => circuits.find((c) => c.id === id)?.color ?? INK;
   const selected = nodes.find((n) => n.id === selectedNodeId) ?? null;
   const dragActive = dragging !== null || snapPreview !== null;
+
+  const showApplianceNames = scale >= 75;
+  const appsOn = (nodeId: string) =>
+    layers.appliances ? appliances.filter((a) => a.assignedNodeId === nodeId) : [];
+  const shortName = (app: ApplianceItem) => app.name.split(' ')[0];
+  const codeWidth = (text: string) => text.length * 6.7 + 8;
+  const tagWidth = (apps: ApplianceItem[]) =>
+    apps.length === 0
+      ? 0
+      : apps.reduce(
+          (sum, a) => sum + 16 + (showApplianceNames ? shortName(a).length * 5.9 + 3 : 0),
+          4
+        );
 
   // Label layout, one pass per surface, the selected element first.
   const labels = new Map<string, { x: number; y: number; text: string; width: number }>();
@@ -436,16 +634,27 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
         y: p.y,
         anchorWidth: footprint.width * scale,
         anchorHeight: footprint.height * scale,
-        labelWidth: text.length * 6.7 + 8,
+        labelWidth: codeWidth(text) + tagWidth(appsOn(n.id)),
         labelHeight: 15,
         gap: n.id === selectedNodeId ? 12 : 5,
         bounds: box,
       };
     });
-    placeLabels(requests, obstacles).forEach((pos, id) => {
-      const request = requests.find((q) => q.id === id)!;
+    const cableBoxes: Box[] = [];
+    for (const seg of visibleSegments.filter((s) => s.surface === r.surface)) {
+      const pts = seg.points.map((p) => storedToPx(r, p));
+      for (let i = 1; i < pts.length; i++) {
+        cableBoxes.push([
+          Math.min(pts[i - 1].x, pts[i].x) - 1,
+          Math.min(pts[i - 1].y, pts[i].y) - 1,
+          Math.abs(pts[i - 1].x - pts[i].x) + 2,
+          Math.abs(pts[i - 1].y - pts[i].y) + 2,
+        ]);
+      }
+    }
+    placeLabels(requests, obstacles, cableBoxes).forEach((pos, id) => {
       const node = onSurface.find((n) => n.id === id)!;
-      labels.set(id, { ...pos, text: textOf(node), width: request.labelWidth });
+      labels.set(id, { ...pos, text: textOf(node), width: codeWidth(textOf(node)) });
     });
   }
 
@@ -455,23 +664,20 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
     <div className="relative w-full h-full bg-desk select-none" data-testid="nacrt">
       <div
         ref={scrollerRef}
-        className="absolute inset-0 overflow-auto flex"
-        onWheel={(e) => {
-          if (e.ctrlKey || e.metaKey) {
-            e.preventDefault();
-            setZoom((z) =>
-              Math.max(0.5, Math.min(8, e.deltaY < 0 ? z * 1.1 : z / 1.1))
-            );
-          }
-        }}
+        className="absolute inset-0 overflow-hidden"
+        style={{ touchAction: 'none', cursor: panning ? 'grabbing' : 'grab' }}
+        onPointerDown={handleCanvasPointerDown}
+        onPointerMove={handleCanvasPointerMove}
+        onPointerUp={handleCanvasPointerEnd}
+        onPointerCancel={handleCanvasPointerEnd}
       >
         <svg
           ref={svgRef}
           width={svgWidth}
           height={svgHeight}
           viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-          className="block m-auto bg-paper shrink-0"
-          style={{ overflow: 'visible', touchAction: canDrag && dragging ? 'none' : undefined }}
+          className="absolute left-0 top-0 bg-paper"
+          style={{ overflow: 'visible', transform: `translate(${panX}px, ${panY}px)` }}
           data-scale={scale}
           onPointerMove={handlePointerMove}
           onPointerUp={endDrag}
@@ -489,6 +695,7 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
                   height={box.height}
                   fill="#FFFFFF"
                   onClick={() => {
+                    if (didPan.current) return;
                     onSelectSurface(r.surface);
                     onSelectNode(null);
                   }}
@@ -566,7 +773,28 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
               const colliding = snapPreview?.snap.collidingOpening?.id === op.id;
               const label = layoutOpeningLabel(op, p.x, p.y, w, h, pxRect(r));
               return (
-                <g key={op.id} pointerEvents="none">
+                <g
+                  key={op.id}
+                  data-testid={`otvor-${op.type}-${op.wall}`}
+                  pointerEvents={openingsEditable ? undefined : 'none'}
+                  className={openingsEditable ? 'cursor-move' : undefined}
+                  onPointerDown={(e) => {
+                    if (!openingsEditable) return;
+                    e.stopPropagation();
+                    const hit = pointerToStored(e.clientX, e.clientY);
+                    if (!hit || hit.surface === 'ceiling') return;
+                    dragCounter.current += 1;
+                    setOpeningDrag({
+                      kind: 'opening',
+                      id: op.id,
+                      key: `opening-${dragCounter.current}`,
+                      grabX: hit.x - op.offsetFromLeft,
+                      grabY: hit.y - op.sillHeight,
+                      result: null,
+                    });
+                    svgRef.current?.setPointerCapture(e.pointerId);
+                  }}
+                >
                   <rect
                     x={p.x}
                     y={p.y}
@@ -622,6 +850,61 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
               );
             })}
 
+          {layers.furniture &&
+            furniture
+              .filter((f) => rectOf(f.wall))
+              .map((f) => {
+                const r = rectOf(f.wall)!;
+                const p = viewToPx(r, f.offsetFromLeft, f.bottom + f.height);
+                const w = f.width * scale;
+                const h = f.height * scale;
+                const textWidth = f.name.length * 5.6;
+                const fitsAcross = w >= textWidth + 6;
+                const fitsAlong = !fitsAcross && h >= textWidth + 6 && w >= 14;
+                return (
+                  <g
+                    key={f.id}
+                    data-testid={`namjestaj-${f.name}`}
+                    pointerEvents={openingsEditable ? undefined : 'none'}
+                    className={openingsEditable ? 'cursor-move' : undefined}
+                    onPointerDown={(e) => {
+                      if (!openingsEditable) return;
+                      e.stopPropagation();
+                      const hit = pointerToStored(e.clientX, e.clientY);
+                      if (!hit || hit.surface === 'ceiling') return;
+                      dragCounter.current += 1;
+                      setOpeningDrag({
+                        kind: 'furniture',
+                        id: f.id,
+                        key: `furniture-${dragCounter.current}`,
+                        grabX: hit.x - f.offsetFromLeft,
+                        grabY: hit.y - f.bottom,
+                        result: null,
+                      });
+                      svgRef.current?.setPointerCapture(e.pointerId);
+                    }}
+                  >
+                    <title>{`${f.name} · ${formatMeters(f.width)} × ${formatMeters(f.height)} × ${formatMeters(f.depth)} m`}</title>
+                    <rect x={p.x} y={p.y} width={w} height={h} fill={FURNITURE} stroke={FURNITURE_LINE} />
+                    {fitsAcross && (
+                      <text x={p.x + w / 2} y={h >= 34 ? p.y + 15 : p.y + h / 2 + 4} textAnchor="middle" fontSize="10.5" fill={FURNITURE_TEXT}>
+                        {f.name}
+                      </text>
+                    )}
+                    {fitsAlong && (
+                      <text
+                        transform={`translate(${p.x + w / 2 + 4},${p.y + h / 2}) rotate(-90)`}
+                        textAnchor="middle"
+                        fontSize="10.5"
+                        fill={FURNITURE_TEXT}
+                      >
+                        {f.name}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+
           {visibleSegments
             .filter((s) => rectOf(s.surface))
             .map((seg) => {
@@ -640,7 +923,7 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
                   opacity={dimmed ? 0.4 : 1}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onSelectNode(seg.toNodeId);
+                    if (!didPan.current) onSelectNode(seg.toNodeId);
                   }}
                 >
                   <path d={d} fill="none" stroke="transparent" strokeWidth="10" />
@@ -799,9 +1082,134 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
                   >
                     {pos.text}
                   </text>
+                  {appsOn(node.id).length > 0 && (() => {
+                    let cursor = pos.x + pos.width + 4;
+                    const apps = appsOn(node.id);
+                    return (
+                      <g data-testid={`tag-${node.label.split(' ')[0]}`}>
+                        <rect
+                          x={pos.x + pos.width}
+                          y={pos.y}
+                          width={tagWidth(apps)}
+                          height={15}
+                          fill="#FFFFFF"
+                          stroke={colorOf(node.circuitId)}
+                        />
+                        {apps.map((app) => {
+                          const Icon = applianceIcon(app);
+                          const x = cursor;
+                          cursor += 16 + (showApplianceNames ? shortName(app).length * 5.9 + 3 : 0);
+                          return (
+                            <g key={app.id}>
+                              <title>{`${app.name} · ${app.powerWatts} W`}</title>
+                              <Icon x={x} y={pos.y + 1.5} width={12} height={12} color={INK} />
+                              {showApplianceNames && (
+                                <text x={x + 15} y={pos.y + 11.3} fontSize="10.5" fill={INK}>
+                                  {shortName(app)}
+                                </text>
+                              )}
+                            </g>
+                          );
+                        })}
+                      </g>
+                    );
+                  })()}
                 </g>
               );
             })}
+
+          {socketHighlight && (() => {
+            const node = nodes.find((n) => n.id === socketHighlight);
+            const r = node && rectOf(node.surface);
+            if (!node || !r) return null;
+            const p = storedToPx(r, node);
+            return <circle cx={p.x} cy={p.y} r={16} fill="none" stroke="#00693A" strokeWidth="3" pointerEvents="none" />;
+          })()}
+
+          {openingDrag?.result && rectOf(openingDrag.result.wall) && (() => {
+            const opening =
+              openingDrag.kind === 'opening'
+                ? openings.find((o) => o.id === openingDrag.id)
+                : furniture.find((f) => f.id === openingDrag.id);
+            if (!opening) return null;
+            const { result } = openingDrag;
+            const r = rectOf(result.wall)!;
+            const box = pxRect(r);
+            const topLeft = viewToPx(r, result.offsetFromLeft, result.sillHeight + opening.height);
+            const w = opening.width * scale;
+            const h = opening.height * scale;
+            const color = result.valid ? SELECT : ERROR;
+            const midY = topLeft.y + h / 2;
+            const midX = topLeft.x + w / 2;
+            const floor = box.y + box.height;
+            const tag = (x: number, y: number, value: number) => (
+              <g>
+                <rect x={x - 22} y={y - 8} width={44} height={15} fill="#FFFFFF" />
+                <text x={x} y={y + 4} textAnchor="middle" fontSize="11.5" fontWeight="700" fill={color}>
+                  {formatMeters(value)}
+                </text>
+              </g>
+            );
+            const wallWidth = r.widthM;
+            const right = wallWidth - result.offsetFromLeft - opening.width;
+            const above = r.heightM - result.sillHeight - opening.height;
+            const locked = result.valid ? result.locks : [];
+            return (
+              <g pointerEvents="none">
+                {locked.map((lock) => {
+                  const a = lock.axis === 'x' ? viewToPx(r, lock.guide, 0) : viewToPx(r, 0, lock.guide);
+                  const b = lock.axis === 'x' ? viewToPx(r, lock.guide, r.heightM) : viewToPx(r, r.widthM, lock.guide);
+                  return <line key={lock.label} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#00693A" strokeWidth="2" strokeDasharray="6 3" />;
+                })}
+                <rect
+                  x={topLeft.x}
+                  y={topLeft.y}
+                  width={w}
+                  height={h}
+                  fill={result.valid ? 'none' : '#F9DEDC'}
+                  fillOpacity={0.7}
+                  stroke={color}
+                  strokeWidth="2.5"
+                  strokeDasharray={result.valid ? undefined : '5 3'}
+                />
+                <g stroke={color} strokeWidth="1.5">
+                  <line x1={box.x} y1={midY} x2={topLeft.x} y2={midY} />
+                  <line x1={topLeft.x + w} y1={midY} x2={box.x + box.width} y2={midY} />
+                  <line x1={midX} y1={box.y} x2={midX} y2={topLeft.y} />
+                  {result.sillHeight > 0 && <line x1={midX} y1={topLeft.y + h} x2={midX} y2={floor} />}
+                </g>
+                {tag((box.x + topLeft.x) / 2, midY - 10, result.offsetFromLeft)}
+                {tag((topLeft.x + w + box.x + box.width) / 2, midY - 10, right)}
+                {tag(midX, (box.y + topLeft.y) / 2, above)}
+                {result.sillHeight > 0 && tag(midX, (topLeft.y + h + floor) / 2, result.sillHeight)}
+                <g data-testid="otvor-status">
+                  <rect
+                    x={topLeft.x}
+                    y={Math.max(box.y + 2, topLeft.y - 21)}
+                    width={Math.max(
+                      28,
+                      (result.reason ?? locked.map((l) => l.label).join(' · ')).length * 6.3 + 24
+                    )}
+                    height={18}
+                    rx={3}
+                    fill={result.valid ? '#00693A' : ERROR}
+                  />
+                  {result.valid && (
+                    <Lock x={topLeft.x + 5} y={Math.max(box.y + 2, topLeft.y - 21) + 3} width={12} height={12} color="#FFFFFF" />
+                  )}
+                  <text
+                    x={topLeft.x + (result.valid ? 21 : 6)}
+                    y={Math.max(box.y + 2, topLeft.y - 21) + 13}
+                    fontSize="11.5"
+                    fontWeight="700"
+                    fill="#FFFFFF"
+                  >
+                    {result.reason ?? locked.map((l) => l.label).join(' · ')}
+                  </text>
+                </g>
+              </g>
+            );
+          })()}
 
           {selected && rectOf(selected.surface) && (() => {
             const r = rectOf(selected.surface)!;
@@ -858,13 +1266,13 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
       </div>
 
       <div className="absolute bottom-3 right-3 flex items-center gap-0.5 p-0.5 bg-paper border border-line rounded no-print">
-        <button className="icon-btn" aria-label="Smanji" onClick={() => setZoom((z) => Math.max(0.5, z / ZOOM_STEP))}>
+        <button className="icon-btn" aria-label="Smanji" onClick={() => zoomFromCenter(1 / ZOOM_STEP)}>
           <ZoomOut className="w-4 h-4" />
         </button>
-        <button className="icon-btn" aria-label="Prilagodi prozoru" onClick={() => setZoom(1)}>
+        <button className="icon-btn" aria-label="Prilagodi prozoru" onClick={() => setView(null)}>
           <Maximize className="w-4 h-4" />
         </button>
-        <button className="icon-btn" aria-label="Povećaj" onClick={() => setZoom((z) => Math.min(8, z * ZOOM_STEP))}>
+        <button className="icon-btn" aria-label="Povećaj" onClick={() => zoomFromCenter(ZOOM_STEP)}>
           <ZoomIn className="w-4 h-4" />
         </button>
       </div>

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, Trash2, Zap } from 'lucide-react';
+import { Plus, Trash2, X, Zap } from 'lucide-react';
 import { ELEMENT_CATALOG, WALL_META } from '../data/presets';
 import {
   getSurfaceSize,
@@ -15,6 +15,10 @@ import {
   updateNode,
 } from '../engine/projectOps';
 import { CircuitAnalysis, ElectricalNode, ProjectData } from '../types/electrical';
+import { APPLIANCE_CATALOG_TEMPLATES } from '../data/presets';
+import { addApplianceFromTemplate, assignAppliance } from '../engine/projectOps';
+import { applianceIcon } from './applianceIcons';
+import { socketSlots } from './LoadsPanel';
 import { NumberField, PanelHeader } from './ui';
 
 type Apply = (update: (data: ProjectData) => ProjectData) => void;
@@ -137,6 +141,77 @@ export function Inspector({
           </select>
         </div>
       )}
+
+      {node.category.startsWith('socket_') && (() => {
+        const { total, used, free } = socketSlots(node, data.appliances);
+        const onSocket = data.appliances.filter((a) => a.assignedNodeId === node.id);
+        const unassigned = data.appliances.filter(
+          (a) => !a.assignedNodeId || !nodes.some((n) => n.id === a.assignedNodeId)
+        );
+        return (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="section-title">Trošila</span>
+              <b className="tabular-nums">
+                {used}/{total}
+              </b>
+            </div>
+            {onSocket.map((app) => {
+              const Icon = applianceIcon(app);
+              return (
+                <div key={app.id} className="flex items-center gap-1.5 p-1.5 bg-paper border border-line rounded">
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 min-w-0 truncate">{app.name}</span>
+                  <button
+                    aria-label={`Odvoji ${app.name}`}
+                    className="text-muted hover:text-ink shrink-0"
+                    onClick={() => apply((d) => assignAppliance(d, app.id, undefined))}
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              );
+            })}
+            {free > 0 && (
+              <select
+                className="field"
+                aria-label="Dodaj trošilo na utičnicu"
+                value=""
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value.startsWith('tpl:')) {
+                    const template = APPLIANCE_CATALOG_TEMPLATES[Number(value.slice(4))];
+                    apply((d) => {
+                      const next = addApplianceFromTemplate(d, template);
+                      return assignAppliance(next, next.appliances[next.appliances.length - 1].id, node.id);
+                    });
+                  } else if (value) {
+                    apply((d) => assignAppliance(d, value, node.id));
+                  }
+                }}
+              >
+                <option value="">Dodaj trošilo…</option>
+                {unassigned.length > 0 && (
+                  <optgroup label="Nedodijeljena">
+                    {unassigned.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name} ({a.powerWatts} W)
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="Iz kataloga">
+                  {APPLIANCE_CATALOG_TEMPLATES.map((t, i) => (
+                    <option key={t.name} value={`tpl:${i}`}>
+                      {t.name} ({t.powerWatts} W)
+                    </option>
+                  ))}
+                </optgroup>
+              </select>
+            )}
+          </div>
+        );
+      })()}
 
       {isBoard && (
         <div className="space-y-1">

@@ -4,6 +4,7 @@ import {
   ElectricalCircuit,
   ElectricalNode,
   ElementCategory,
+  FurnitureItem,
   RoomDimensions,
   WallId,
   WallOpening,
@@ -97,6 +98,15 @@ export const ELEMENT_CATALOG: Record<ElementCategory, ElementMetaInfo> = {
     isThreePhase: true,
     description: 'Trofazni priključak 400V (3L+N+PE) za indukciju, pećnicu ili jaču klimu',
     symbolText: '3~',
+  },
+  socket_fixed_1p: {
+    category: 'socket_fixed_1p',
+    name: 'Fiksni priključak (priključna kutija)',
+    shortCode: 'FP',
+    defaultHeightMeters: 0.60,
+    outletsProvided: 1,
+    description: 'Izravni priključak jačeg jednofaznog trošila, za krugove iznad 16 A gdje Šuko utičnica nije dopuštena',
+    symbolText: '⊞',
   },
   switch_single: {
     category: 'switch_single',
@@ -289,14 +299,14 @@ export const CONDUCTOR_META: Record<
     label: 'Komutirana faza (L\')',
     short: 'L\'',
     colorHex: '#C2410C',
-    iecColorName: 'Narančasta / Crna',
+    iecColorName: 'Crna (na shemi narančasta)',
     role: 'Prekinuta faza od prekidača prema trošilu (svjetlu)',
   },
   L_switched_2: {
     label: 'Komutirana faza 2 (L\'\')',
     short: 'L\'\'',
     colorHex: '#6D35B8',
-    iecColorName: 'Ljubičasta',
+    iecColorName: 'Siva (na shemi ljubičasta)',
     role: 'Druga grana serijskog (dvostrukog) prekidača',
   },
   L_traveler_1: {
@@ -395,6 +405,16 @@ export const INITIAL_OPENINGS: WallOpening[] = [
     height: 0.6,
     sillHeight: 1.35,
   },
+];
+
+export const INITIAL_FURNITURE: FurnitureItem[] = [
+  { id: 'fur-1', wall: 'south', name: 'Donji element', offsetFromLeft: 0, width: 0.6, height: 0.85, depth: 0.6, bottom: 0 },
+  { id: 'fur-2', wall: 'south', name: 'Donji element', offsetFromLeft: 0.6, width: 0.6, height: 0.85, depth: 0.6, bottom: 0 },
+  { id: 'fur-3', wall: 'south', name: 'Štednjak', offsetFromLeft: 1.2, width: 0.6, height: 0.85, depth: 0.6, bottom: 0 },
+  { id: 'fur-4', wall: 'south', name: 'Perilica posuđa', offsetFromLeft: 1.8, width: 0.6, height: 0.85, depth: 0.6, bottom: 0 },
+  { id: 'fur-5', wall: 'south', name: 'Viseći ormarić', offsetFromLeft: 1.8, width: 0.6, height: 0.7, depth: 0.35, bottom: 1.45 },
+  { id: 'fur-6', wall: 'south', name: 'Napa', offsetFromLeft: 1.2, width: 0.6, height: 0.4, depth: 0.5, bottom: 1.6 },
+  { id: 'fur-7', wall: 'east', name: 'Klima uređaj', offsetFromLeft: 4.25, width: 0.8, height: 0.3, depth: 0.25, bottom: 2.15 },
 ];
 
 export const INITIAL_CIRCUITS: ElectricalCircuit[] = [
@@ -587,7 +607,7 @@ export const INITIAL_NODES: ElectricalNode[] = [
     category: 'junction_box',
     label: 'RK-2 (Razvodna kutija Sjever)',
     x: 0.85,
-    y: 2.28,
+    y: 2.30,
     circuitId: 'cir-1',
     parentBoxId: 'node-ro-1',
   },
@@ -621,7 +641,7 @@ export const INITIAL_NODES: ElectricalNode[] = [
     category: 'junction_box',
     label: 'RK-3 (Razvodna kutija Istok)',
     x: 1.50,
-    y: 2.36,
+    y: 2.30,
     circuitId: 'cir-1',
     parentBoxId: 'node-ro-1',
   },

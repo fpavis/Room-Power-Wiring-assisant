@@ -152,9 +152,23 @@
   display: none;
 }
 
+/* Margins live in the page content: the browser's print dialog can override @page margins. */
 @page {
   size: A4 landscape;
-  margin: 10mm;
+  margin: 0;
+}
+
+.print-page {
+  box-sizing: border-box;
+  width: 297mm;
+  padding: 12mm 10mm 12mm 15mm;
+  break-after: page;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.print-page:last-child {
+  break-after: auto;
 }
 
 @media print {

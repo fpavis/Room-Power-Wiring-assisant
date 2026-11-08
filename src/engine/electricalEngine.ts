@@ -168,7 +168,7 @@ export function getCableAndConduitSpec(
     };
   }
 
-  if (cat === 'socket_single' || cat === 'socket_double') {
+  if (cat === 'socket_single' || cat === 'socket_double' || cat === 'socket_fixed_1p') {
     const cs = circuit.cableCrossSection;
     return {
       conductors: ['L', 'N', 'PE'],
@@ -191,27 +191,27 @@ export function getCableAndConduitSpec(
 
   if (cat === 'switch_double') {
     return {
-      conductors: ['L', 'L_switched', 'L_switched_2', 'N', 'PE'],
-      cableSpec: 'NYM-J 5x1,5 mm²',
+      conductors: ['L', 'L_switched', 'L_switched_2', 'PE'],
+      cableSpec: 'NYM-J 4x1,5 mm²',
       crossSectionMm2: 1.5,
       conduitDiameterMm: 20,
-      description: 'Serijski prekidač (Faza L + 2 komutirana odvoda L\'/L\'\' + N + PE)',
+      description: 'Serijski prekidač (Faza L + 2 komutirana odvoda L\'/L\'\' + PE)',
     };
   }
 
   if (cat === 'switch_two_way') {
     return {
-      conductors: ['L', 'L_traveler_1', 'L_traveler_2', 'N', 'PE'],
-      cableSpec: 'NYM-J 5x1,5 mm²',
+      conductors: ['L', 'L_traveler_1', 'L_traveler_2', 'PE'],
+      cableSpec: 'NYM-J 4x1,5 mm²',
       crossSectionMm2: 1.5,
       conduitDiameterMm: 20,
-      description: 'Izmjenični prekidač (Faza/L\' + 2 korespondenta K1/K2 + N + PE)',
+      description: 'Izmjenični prekidač (Faza ili L\' + 2 korespondenta K1/K2 + PE)',
     };
   }
 
   if (cat === 'switch_cross') {
     return {
-      conductors: ['L_traveler_1', 'L_traveler_2', 'L_switched', 'L_switched_2', 'PE'],
+      conductors: ['L_traveler_1', 'L_traveler_2', 'L_traveler_1', 'L_traveler_2', 'PE'],
       cableSpec: 'NYM-J 5x1,5 mm²',
       crossSectionMm2: 1.5,
       conduitDiameterMm: 20,
@@ -388,7 +388,8 @@ export function analyzeProject(
     (n) => n.category === 'socket_shuko_3p'
   ).length;
 
-  const totalAvailableOutlets1P = totalSingleSockets * 1 + totalDoubleSockets * 2;
+  const totalFixedOutlets = nodes.filter((n) => n.category === 'socket_fixed_1p').length;
+  const totalAvailableOutlets1P = totalSingleSockets * 1 + totalDoubleSockets * 2 + totalFixedOutlets;
   const totalAvailableOutlets3P = totalThreePhaseSockets;
 
   const plugAppliances1P = appliances.filter((a) => !a.threePhase);
@@ -470,6 +471,7 @@ export function analyzeProject(
     let status: 'nominal' | 'warning' | 'overload' = 'nominal';
     if (utilizationPercent > 100) status = 'overload';
     else if (utilizationPercent >= 80) status = 'warning';
+    const isSingleLoad = assignedAppliances.length === 1 && lightsCount === 0;
 
     const recommendedBreakerAmps: 10 | 16 | 20 =
       lightsCount > 0 && socketOutletsCount === 0 && totalPowerWatts <= 2000
@@ -486,9 +488,16 @@ export function analyzeProject(
       warnings.push(
         `Preopterećenje kruga! Ukupno ${totalPowerWatts} W (${formatNumber(currentAmps, 2)} A) prelazi granicu osigurača ${circuit.breakerCurve}${circuit.breakerAmps} (${maxCapacityWatts} W).`
       );
+    } else if (status === 'warning' && isSingleLoad) {
+      const usage = `${assignedAppliances[0].name}: ${formatNumber(currentAmps, 2)} A od ${circuit.breakerAmps} A (${formatNumber(utilizationPercent, 1)} %).`;
+      warnings.push(
+        circuit.breakerAmps < 20 && circuit.phaseType === '1P'
+          ? `${usage} Unutar je osigurača, ali s malo rezerve. Rješenje: fiksni priključak, osigurač 20 A i presjek 4,0 mm².`
+          : `${usage} Unutar je osigurača, ali s malo rezerve. Za više rezerve potreban je trofazni priključak.`
+      );
     } else if (status === 'warning') {
       warnings.push(
-        `Visoko opterećenje (${formatNumber(utilizationPercent, 1)} %). Preporučuje se odvojiti jača trošila u zaseban strujni krug.`
+        `Visoko opterećenje (${formatNumber(utilizationPercent, 1)} %). Rješenje: odvojiti jača trošila u zaseban strujni krug.`
       );
     }
 
@@ -577,6 +586,7 @@ export function analyzeProject(
     socket_single: 0,
     socket_double: 0,
     socket_shuko_3p: 0,
+    socket_fixed_1p: 0,
     switch_single: 0,
     switch_double: 0,
     switch_two_way: 0,
@@ -592,6 +602,10 @@ export function analyzeProject(
   for (const c of circuits) {
     const key = `Automatski osigurač ${c.phaseType} ${c.breakerCurve}${c.breakerAmps}A`;
     breakersBySpec[key] = (breakersBySpec[key] || 0) + 1;
+  }
+  if (circuits.length > 0) {
+    const poles = circuits.some((c) => c.phaseType === '3P') ? '4P' : '2P';
+    breakersBySpec[`FID sklopka ${poles} 40 A / 30 mA`] = 1;
   }
 
   const wagoConnectorsCount =

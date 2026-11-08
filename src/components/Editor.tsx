@@ -12,12 +12,25 @@ import {
   Printer,
   Redo2,
   Undo2,
+  Wand2,
   Zap,
 } from 'lucide-react';
 import { ELEMENT_CATALOG, WALL_META } from '../data/presets';
 import { analyzeProject, getPrimaryJunctionBoxWall } from '../engine/electricalEngine';
 import { formatNumber } from '../engine/geometry';
-import { addNode, canPlaceOn, getOutsideNodes, moveNode, moveNodeInside } from '../engine/projectOps';
+import {
+  addNode,
+  autoAdaptNetwork,
+  canPlaceOn,
+  getOutsideNodes,
+  moveNode,
+  moveNodeInside,
+  NetworkAdaptation,
+  updateOpening,
+} from '../engine/projectOps';
+import { updateFurniture } from '../engine/furniture';
+import { assignAppliance } from '../engine/projectOps';
+import { checkInstallationRules } from '../engine/rules';
 import { computeRoutedSegments } from '../engine/routing';
 import {
   renameProject,
@@ -28,14 +41,14 @@ import {
 } from '../persistence/db';
 import { FILE_EXTENSION, serializeProject } from '../persistence/projectFile';
 import { commit, createHistory, History, redo, undo } from '../state/history';
-import { ElementCategory, ProjectData, SurfaceId, WallId } from '../types/electrical';
+import { ApplianceItem, ElementCategory, ProjectData, SurfaceId, WallId } from '../types/electrical';
 import { BomContent } from './BomAndPrintModal';
 import { Blueprint2DCanvas, CanvasHandle, CanvasLayers } from './Blueprint2DCanvas';
 import { Inspector } from './Inspector';
-import { LoadsPanel } from './LoadsPanel';
+import { LoadsPanel, socketSlots } from './LoadsPanel';
 import { PrintSheets } from './PrintSheets';
 import { RoomPanel } from './RoomPanel';
-import { Dialog, PanelHeader, useIsCompact } from './ui';
+import { CollapsibleSection, Dialog, PanelHeader, useIsCompact } from './ui';
 import { UnfoldedRoom3D } from './UnfoldedRoom3D';
 import { WiringSchematicModal } from './WiringSchematicModal';
 
@@ -51,6 +64,13 @@ const STEPS: { id: Step; label: string }[] = [
 ];
 
 const STORAGE_NOTICE_KEY = 'elektroplan:storage-notice-hidden';
+
+const PALETTE_GROUPS: { id: string; title: string; categories: ElementCategory[] }[] = [
+  { id: 'napajanje', title: 'Ormari i kutije', categories: ['distribution_board', 'junction_box'] },
+  { id: 'uticnice', title: 'Utičnice', categories: ['socket_single', 'socket_double', 'socket_shuko_3p', 'socket_fixed_1p'] },
+  { id: 'prekidaci', title: 'Prekidači', categories: ['switch_single', 'switch_double', 'switch_two_way', 'switch_cross'] },
+  { id: 'rasvjeta', title: 'Rasvjeta', categories: ['light_ceiling', 'light_wall'] },
+];
 
 type HistoryAction =
   | { type: 'commit'; update: (d: ProjectData) => ProjectData; key: string | null }
@@ -107,7 +127,10 @@ export function Editor({
     zones: false,
     dimensions: false,
     snap: true,
+    appliances: true,
+    furniture: true,
   });
+  const [applianceGhost, setApplianceGhost] = useState<{ name: string; x: number; y: number } | null>(null);
   const [layersOpen, setLayersOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -118,6 +141,7 @@ export function Editor({
   const [printRequested, setPrintRequested] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
+  const [adaptation, setAdaptation] = useState<NetworkAdaptation | null>(null);
   const [storageNoticeHidden, setStorageNoticeHidden] = useState(() => {
     try {
       return localStorage.getItem(STORAGE_NOTICE_KEY) === '1';
@@ -202,6 +226,18 @@ export function Editor({
     [nodes, appliances, circuits, segments]
   );
   const outsideNodes = useMemo(() => getOutsideNodes(data), [data]);
+  const ruleHints = useMemo(
+    () =>
+      checkInstallationRules(
+        data,
+        segments,
+        new Map(circuitAnalyses.map((c) => [c.circuit.id, c.totalPowerWatts]))
+      ),
+    [data, segments, circuitAnalyses]
+  );
+
+  const openAdaptation = () => setAdaptation(autoAdaptNetwork(data));
+  const canAdapt = useMemo(() => autoAdaptNetwork(data).changes.length > 0, [data]);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null;
   const selectedCircuit = circuits.find((c) => c.id === selectedNode?.circuitId) ?? null;
@@ -312,6 +348,41 @@ export function Editor({
   };
   const suppressClick = useRef(false);
 
+  const startApplianceDrag = (app: ApplianceItem, e: React.PointerEvent) => {
+    if (compact || e.button !== 0) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
+      dragging = true;
+      setApplianceGhost({ name: app.name, x: ev.clientX, y: ev.clientY });
+      canvasRef.current?.highlightSocketAt(ev.clientX, ev.clientY);
+    };
+    const stop = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', stop);
+      setApplianceGhost(null);
+      canvasRef.current?.clearSocketHighlight();
+    };
+    const finish = (ev: PointerEvent) => {
+      const socketId = dragging ? canvasRef.current?.highlightSocketAt(ev.clientX, ev.clientY) : null;
+      stop();
+      if (!socketId) return;
+      const socket = nodes.find((n) => n.id === socketId)!;
+      if (socketSlots(socket, appliances).free <= 0) {
+        notify(`Utičnica ${socket.label.split(' ')[0]} je popunjena.`);
+        return;
+      }
+      apply((d) => assignAppliance(d, app.id, socketId));
+      setSelectedNodeId(socketId);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', stop);
+  };
+
   const surfaceName =
     activeSurface === 'ceiling' ? 'Strop' : WALL_META[activeSurface].name;
 
@@ -321,37 +392,57 @@ export function Editor({
         {compact ? 'Dodirni za dodavanje na plohu: ' : 'Povuci na plohu ili klikni za dodavanje na: '}
         <b className="text-ink">{surfaceName}</b>
       </p>
-      <div className="space-y-1">
-        {(Object.keys(ELEMENT_CATALOG) as ElementCategory[]).map((category) => {
-          const item = ELEMENT_CATALOG[category];
-          return (
-            <button
-              key={category}
-              className="w-full flex items-center gap-2 px-2 py-1.5 bg-paper border border-line rounded text-left hover:border-ink cursor-grab"
-              style={{ touchAction: 'pan-y' }}
-              onPointerDown={startPaletteDrag(category)}
-              onClick={() => {
-                if (suppressClick.current) {
-                  suppressClick.current = false;
-                  return;
-                }
-                addByTap(category);
-              }}
-            >
-              <b className="w-8 text-[12px] shrink-0">{item.shortCode}</b>
-              <span className="truncate">{item.name}</span>
-            </button>
-          );
-        })}
-      </div>
+      {PALETTE_GROUPS.map((group) => (
+        <CollapsibleSection
+          key={group.id}
+          id={`elementi-${group.id}`}
+          title={group.title}
+          summary={String(group.categories.length)}
+        >
+          <div className="space-y-1">
+            {group.categories.map((category) => {
+              const item = ELEMENT_CATALOG[category];
+              return (
+                <button
+                  key={category}
+                  className="w-full flex items-center gap-2 px-2 py-1.5 bg-paper border border-line rounded text-left hover:border-ink cursor-grab"
+                  style={{ touchAction: 'pan-y' }}
+                  onPointerDown={startPaletteDrag(category)}
+                  onClick={() => {
+                    if (suppressClick.current) {
+                      suppressClick.current = false;
+                      return;
+                    }
+                    addByTap(category);
+                  }}
+                >
+                  <b className="w-8 text-[12px] shrink-0">{item.shortCode}</b>
+                  <span className="truncate">{item.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </CollapsibleSection>
+      ))}
     </div>
   );
 
   const reviewContent = (
-    <div className="space-y-4">
-      <section className="space-y-2">
-        <h3 className="section-title">Provjera</h3>
-        {outsideNodes.length === 0 && socketBalance.isBalanced && warnedCircuits.length === 0 && (
+    <div className="space-y-2">
+      <CollapsibleSection
+        id="provjera-nalazi"
+        title="Provjera"
+        summary={String(
+          outsideNodes.length +
+            ruleHints.length +
+            circuitAnalyses.reduce((sum, ca) => sum + ca.warnings.length, 0) +
+            (socketBalance.isBalanced ? 0 : 1)
+        )}
+      >
+        {outsideNodes.length === 0 &&
+          socketBalance.isBalanced &&
+          warnedCircuits.length === 0 &&
+          ruleHints.length === 0 && (
           <p className="flex items-center gap-1.5 font-semibold text-ok">
             <CheckCircle2 className="w-4 h-4" /> Sve je u redu.
           </p>
@@ -369,6 +460,16 @@ export function Editor({
             Nedostaje utičnica: {socketBalance.missingOutlets1P + socketBalance.missingOutlets3P}
           </p>
         )}
+        {ruleHints.map((hint) => (
+          <p
+            key={hint.id}
+            className={`p-2 rounded text-[12.5px] ${
+              hint.level === 'warning' ? 'bg-warn' : 'bg-paper border border-line'
+            }`}
+          >
+            {hint.text}
+          </p>
+        ))}
         {circuitAnalyses.flatMap((ca) =>
           ca.warnings.map((warning) => (
             <p
@@ -381,9 +482,17 @@ export function Editor({
             </p>
           ))
         )}
-      </section>
-      <section className="space-y-2 pt-3 border-t border-line">
-        <h3 className="section-title">Kabeli</h3>
+      </CollapsibleSection>
+      {canAdapt && (
+        <button className="btn btn-primary w-full" onClick={openAdaptation}>
+          <Wand2 className="w-4 h-4" /> Prikaži rješenja
+        </button>
+      )}
+      <CollapsibleSection
+        id="provjera-kabeli"
+        title="Kabeli"
+        summary={`${bom.totalPurchaseCableMeters} m`}
+      >
         <div className="flex justify-between tabular-nums">
           <span>Stvarna trasa</span>
           <b>{formatNumber(bom.totalRouteLengthMeters, 1)} m</b>
@@ -392,8 +501,8 @@ export function Editor({
           <span>Za nabavu s rezervom</span>
           <b>{bom.totalPurchaseCableMeters} m</b>
         </div>
-      </section>
-      <section className="space-y-2 pt-3 border-t border-line">
+      </CollapsibleSection>
+      <CollapsibleSection id="provjera-dokumenti" title="Sheme i ispis">
         <button className="btn w-full" onClick={() => setShowWiring(true)}>
           <Zap className="w-4 h-4" /> Sheme spajanja
         </button>
@@ -406,12 +515,12 @@ export function Editor({
         <button className="btn w-full" onClick={() => downloadProject(name, data)}>
           <Download className="w-4 h-4" /> Izvezi datoteku projekta
         </button>
-      </section>
+      </CollapsibleSection>
     </div>
   );
 
   const stepContent = {
-    prostorija: <RoomPanel data={data} apply={apply} />,
+    prostorija: <RoomPanel data={data} apply={apply} activeSurface={activeSurface} />,
     elementi: paletteContent,
     trosila: (
       <LoadsPanel
@@ -419,7 +528,8 @@ export function Editor({
         apply={apply}
         circuitAnalyses={circuitAnalyses}
         socketBalance={socketBalance}
-        notify={notify}
+        onStartApplianceDrag={startApplianceDrag}
+        onAutoAdapt={openAdaptation}
       />
     ),
     provjera: reviewContent,
@@ -653,6 +763,8 @@ export function Editor({
                       {toggle('wires', 'Svi vodiči (L, N, PE)')}
                       {toggle('dimensions', 'Sve kote od poda')}
                       {toggle('zones', 'Instalacijske zone (30 cm)')}
+                      {toggle('appliances', 'Trošila na nacrtu')}
+                      {toggle('furniture', 'Namještaj')}
                       {toggle('snap', 'Magnetsko poravnanje')}
                       <label className="label pt-1" htmlFor="filter-kruga">Prikaži strujni krug</label>
                       <select id="filter-kruga" className="field" value={circuitFilter} onChange={(e) => setCircuitFilter(e.target.value)}>
@@ -677,6 +789,8 @@ export function Editor({
                   nodes={nodes}
                   circuits={circuits}
                   segments={segments}
+                  furniture={data.furniture}
+                  showFurniture={layers.furniture}
                   unfoldTarget={unfold}
                   showWireConductors={layers.wires}
                   showInstallZones={layers.zones}
@@ -693,6 +807,15 @@ export function Editor({
                   nodes={nodes}
                   circuits={circuits}
                   segments={segments}
+                  appliances={appliances}
+                  furniture={data.furniture}
+                  onMoveFurniture={(id, wall, offsetFromLeft, bottom, key) =>
+                    apply((d) => updateFurniture(d, id, { wall, offsetFromLeft, bottom }), key)
+                  }
+                  openingsEditable={step === 'prostorija'}
+                  onMoveOpening={(id, wall, offsetFromLeft, sillHeight, key) =>
+                    apply((d) => updateOpening(d, id, { wall, offsetFromLeft, sillHeight }), key)
+                  }
                   activeSurface={activeSurface}
                   layoutMode={viewMode === '2d_single' ? 'single_surface' : 'strip_all'}
                   layers={layers}
@@ -725,6 +848,15 @@ export function Editor({
                   {stepContent}
                 </div>
               )}
+            </div>
+          )}
+
+          {applianceGhost && (
+            <div
+              className="fixed z-50 px-2 py-1 bg-ink text-paper rounded font-semibold pointer-events-none"
+              style={{ left: applianceGhost.x + 12, top: applianceGhost.y + 12 }}
+            >
+              {applianceGhost.name}
             </div>
           )}
 
@@ -798,11 +930,58 @@ export function Editor({
         </Dialog>
       )}
 
+      {adaptation && (
+        <Dialog title="Automatski prilagoditi mrežu?" onClose={() => setAdaptation(null)}>
+          <div className="space-y-3">
+            {adaptation.changes.length === 0 ? (
+              <p className="font-semibold">Nema promjena koje se mogu napraviti automatski.</p>
+            ) : (
+              <div>
+                <p className="font-semibold mb-1">Promijenit će se:</p>
+                <ul className="list-disc pl-5 space-y-1" data-testid="promjene-mreze">
+                  {adaptation.changes.map((change) => (
+                    <li key={change}>{change}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {adaptation.unresolved.length > 0 && (
+              <div>
+                <p className="font-semibold mb-1 text-err">Ne može se riješiti automatski:</p>
+                <ul className="list-disc pl-5 space-y-1">
+                  {adaptation.unresolved.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              <button className="btn" onClick={() => setAdaptation(null)}>
+                {adaptation.changes.length === 0 ? 'Zatvori' : 'Odustani'}
+              </button>
+              {adaptation.changes.length > 0 && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    const next = adaptation.data;
+                    apply(() => next);
+                    setAdaptation(null);
+                  }}
+                >
+                  Primijeni
+                </button>
+              )}
+            </div>
+          </div>
+        </Dialog>
+      )}
+
       {printHint && (
         <Dialog title="Ispis na A4" onClose={() => setPrintHint(false)}>
           <div className="space-y-3">
             <p>
-              U postavkama ispisa odaberi <b>veličinu 100 %</b>, bez prilagodbe stranici. Inače nacrt neće biti u mjerilu.
+              U postavkama ispisa odaberi <b>veličinu 100 %</b>, bez prilagodbe stranici, a margine ostavi na{' '}
+              <b>Zadano</b> ili <b>Bez</b>. Inače nacrt neće biti u mjerilu.
             </p>
             <p className="text-muted">
               Na svakoj stranici je mjerna traka od 5 cm. Ravnalom provjeri je li duga točno 5 cm.
@@ -828,6 +1007,7 @@ export function Editor({
           segments={segments}
           circuitAnalyses={circuitAnalyses}
           bom={bom}
+          showFurniture={layers.furniture}
         />
       )}
     </div>

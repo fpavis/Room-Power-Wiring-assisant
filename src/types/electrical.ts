@@ -26,6 +26,7 @@ export type ElementCategory =
   | 'socket_single'
   | 'socket_double'
   | 'socket_shuko_3p'
+  | 'socket_fixed_1p'
   | 'switch_single'
   | 'switch_double'
   | 'switch_two_way'
@@ -174,9 +175,24 @@ export interface BomSummary {
   totalPurchaseCableMeters: number;
 }
 
+/** Orientation only: a grey block on the wall, ignored by routing and costing. */
+export interface FurnitureItem {
+  id: string;
+  wall: WallId;
+  name: string;
+  offsetFromLeft: number;
+  width: number;
+  height: number;
+  /** How far it reaches into the room from the wall. */
+  depth: number;
+  /** Distance of the lower edge from the floor. */
+  bottom: number;
+}
+
 export interface ProjectData {
   room: RoomDimensions;
   openings: WallOpening[];
+  furniture: FurnitureItem[];
   nodes: ElectricalNode[];
   circuits: ElectricalCircuit[];
   appliances: ApplianceItem[];

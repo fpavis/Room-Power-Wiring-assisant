@@ -25,7 +25,7 @@ import {
 } from '../types/electrical';
 import { BomContent } from './BomAndPrintModal';
 
-const PAGE_WIDTH_MM = 277;
+const PAGE_WIDTH_MM = 272;
 const DRAWING_MAX_HEIGHT_MM = 150;
 const MARGIN_MM = 6;
 const CAPTION_MM = 6;
@@ -55,7 +55,9 @@ function Drawing({
   widthM,
   heightM,
   scale,
+  showFurniture,
 }: {
+  showFurniture: boolean;
   data: ProjectData;
   segments: RoutedSegment[];
   center: WallId;
@@ -109,15 +111,45 @@ function Drawing({
             anchorHeight: f.height * mm,
             labelWidth: text.length * 1.55 + 1.6,
             labelHeight: 3.6,
-            gap: 0.8,
+            gap: 1,
             bounds: { x, y, width: w, height: h },
           };
         });
-        const labels = placeLabels(requests, obstacles);
+        const cableBoxes: Box[] = [];
+        for (const seg of segments.filter((item) => item.surface === s.surface)) {
+          const pts = seg.points.map((pt) => toMm(s, pt));
+          for (let i = 1; i < pts.length; i++) {
+            cableBoxes.push([
+              Math.min(pts[i - 1].x, pts[i].x) - 0.3,
+              Math.min(pts[i - 1].y, pts[i].y) - 0.3,
+              Math.abs(pts[i - 1].x - pts[i].x) + 0.6,
+              Math.abs(pts[i - 1].y - pts[i].y) + 0.6,
+            ]);
+          }
+        }
+        const labels = placeLabels(requests, obstacles, cableBoxes);
 
         return (
           <g key={s.surface}>
             <rect x={x} y={y} width={w} height={h} fill="#FFFFFF" />
+            {showFurniture &&
+              data.furniture
+                .filter((f) => f.wall === s.surface)
+                .map((f) => {
+                  const p = toMm(s, { x: f.offsetFromLeft, y: f.bottom + f.height });
+                  const fw = f.width * mm;
+                  const fh = f.height * mm;
+                  return (
+                    <g key={f.id}>
+                      <rect x={p.x} y={p.y} width={fw} height={fh} fill="#EFEFEC" stroke="#C4C4BF" strokeWidth="0.2" />
+                      {fw >= f.name.length * 1.3 + 1 && (
+                        <text x={p.x + fw / 2} y={p.y + fh / 2 + 0.8} textAnchor="middle" fontSize={fontSize - 0.2} fill="#9A9A95">
+                          {f.name}
+                        </text>
+                      )}
+                    </g>
+                  );
+                })}
             {openings
               .filter((o) => o.wall === s.surface)
               .map((o) => {
@@ -220,7 +252,7 @@ function Page({
   children: React.ReactNode;
 }) {
   return (
-    <section style={{ width: `${PAGE_WIDTH_MM}mm`, breakAfter: 'page' }}>
+    <section className="print-page">
       <header className="flex items-end justify-between border-b-2 border-ink pb-1 mb-2">
         <div>
           <div className="text-[15px] font-bold">{projectName}</div>
@@ -241,7 +273,7 @@ function Page({
           </div>
         </div>
       </header>
-      {children}
+      <div className="flex flex-col items-center">{children}</div>
     </section>
   );
 }
@@ -252,7 +284,9 @@ export function PrintSheets({
   segments,
   circuitAnalyses,
   bom,
+  showFurniture,
 }: {
+  showFurniture: boolean;
   projectName: string;
   data: ProjectData;
   segments: RoutedSegment[];
@@ -313,6 +347,7 @@ export function PrintSheets({
           data={data}
           segments={segments}
           center={center}
+          showFurniture={showFurniture}
           surfaces={overview}
           widthM={x}
           heightM={overviewHeight}
@@ -336,6 +371,7 @@ export function PrintSheets({
               data={data}
               segments={segments}
               center={center}
+              showFurniture={showFurniture}
               surfaces={[
                 {
                   surface: sheet.surface,
@@ -351,11 +387,15 @@ export function PrintSheets({
               scale={scale}
             />
             {onSheet.length > 0 && (
-              <div style={{ columnCount: 3, columnGap: '8mm' }} className="mt-1 text-[11.5px]">
+              <div style={{ columnCount: 3, columnGap: '8mm', width: '100%' }} className="mt-1 text-[11.5px]">
                 {onSheet.map((n) => (
                   <div key={n.id} className="flex justify-between gap-2 border-b border-line py-0.5" style={{ breakInside: 'avoid' }}>
                     <span className="truncate">
                       <b>{n.label.split(' ')[0]}</b> {ELEMENT_CATALOG[n.category].shortCode}
+                      {data.appliances
+                        .filter((a) => a.assignedNodeId === n.id)
+                        .map((a) => ` · ${a.name.split(' ')[0]}`)
+                        .join('')}
                     </span>
                     <span className="tabular-nums shrink-0">
                       {isCeiling
@@ -371,6 +411,7 @@ export function PrintSheets({
       })}
 
       <Page projectName={projectName} title="Strujni krugovi i troškovnik" date={date}>
+        <div style={{ width: '100%' }}>
         <BomContent
           room={room}
           nodes={nodes}
@@ -378,6 +419,7 @@ export function PrintSheets({
           circuitAnalyses={circuitAnalyses}
           bom={bom}
         />
+        </div>
       </Page>
     </div>
   );

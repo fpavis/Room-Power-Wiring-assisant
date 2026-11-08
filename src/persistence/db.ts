@@ -1,6 +1,6 @@
 import { ProjectData } from '../types/electrical';
 import { randomId } from '../engine/ids';
-import { SCHEMA_VERSION } from './projectFile';
+import { normalizeProjectData, SCHEMA_VERSION } from './projectFile';
 
 export interface StoredProject {
   id: string;
@@ -74,8 +74,9 @@ export async function loadProject(id: string): Promise<StoredProject | undefined
     return stored;
   }
   if (!raw || !stored) return stored;
-  const pending = JSON.parse(raw) as StoredProject;
-  if (pending.updatedAt <= stored.updatedAt) return stored;
+  const parsed = JSON.parse(raw) as StoredProject;
+  if (parsed.updatedAt <= stored.updatedAt) return stored;
+  const pending = { ...parsed, data: normalizeProjectData(parsed.data) };
   await putProject(pending);
   return pending;
 }
@@ -87,8 +88,10 @@ export async function listProjects(): Promise<ProjectSummary[]> {
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-export const getProject = (id: string): Promise<StoredProject | undefined> =>
-  withStore<StoredProject | undefined>(PROJECTS, 'readonly', (s) => s.get(id));
+export async function getProject(id: string): Promise<StoredProject | undefined> {
+  const project = await withStore<StoredProject | undefined>(PROJECTS, 'readonly', (s) => s.get(id));
+  return project && { ...project, data: normalizeProjectData(project.data) };
+}
 
 export const putProject = (project: StoredProject): Promise<IDBValidKey> =>
   withStore<IDBValidKey>(PROJECTS, 'readwrite', (s) => s.put(project));

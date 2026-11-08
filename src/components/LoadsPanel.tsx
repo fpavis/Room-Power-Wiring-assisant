@@ -1,38 +1,84 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, Wand2 } from 'lucide-react';
-import { APPLIANCE_CATALOG_TEMPLATES, WALL_META } from '../data/presets';
+import { GripVertical, Plus, Trash2, Wand2, X } from 'lucide-react';
+import { APPLIANCE_CATALOG_TEMPLATES, ELEMENT_CATALOG, WALL_META } from '../data/presets';
 import { formatNumber, parseDecimal } from '../engine/geometry';
 import {
   addApplianceFromTemplate,
   addCircuit,
   addCustomAppliance,
   assignAppliance,
-  autoAdaptNetwork,
   deleteAppliance,
   deleteCircuit,
   updateCircuit,
 } from '../engine/projectOps';
 import {
+  ApplianceItem,
   CircuitAnalysis,
   ElectricalCircuit,
+  ElectricalNode,
   ProjectData,
   SocketBalanceSummary,
 } from '../types/electrical';
+import { applianceIcon } from './applianceIcons';
+import { CollapsibleSection } from './ui';
 
 type Apply = (update: (data: ProjectData) => ProjectData) => void;
+
+export function socketSlots(node: ElectricalNode, appliances: ApplianceItem[]) {
+  const total = ELEMENT_CATALOG[node.category]?.outletsProvided ?? 0;
+  const used = appliances.filter((a) => a.assignedNodeId === node.id).length;
+  return { total, used, free: total - used };
+}
+
+const sockedLabel = (s: ElectricalNode) =>
+  `${s.label.split(' ')[0]} · ${s.surface === 'ceiling' ? 'Strop' : WALL_META[s.surface].short}`;
+
+function SocketSelect({
+  app,
+  sockets,
+  appliances,
+  onAssign,
+}: {
+  app: ApplianceItem;
+  sockets: ElectricalNode[];
+  appliances: ApplianceItem[];
+  onAssign: (socketId: string | undefined) => void;
+}) {
+  return (
+    <select
+      className="field"
+      aria-label={`Utičnica za ${app.name}`}
+      value={app.assignedNodeId ?? ''}
+      onChange={(e) => onAssign(e.target.value || undefined)}
+    >
+      <option value="">Odaberi utičnicu…</option>
+      {sockets.map((s) => {
+        const { free, total, used } = socketSlots(s, appliances);
+        const isCurrent = s.id === app.assignedNodeId;
+        return (
+          <option key={s.id} value={s.id} disabled={free <= 0 && !isCurrent}>
+            {sockedLabel(s)} ({used}/{total})
+          </option>
+        );
+      })}
+    </select>
+  );
+}
 
 export function LoadsPanel({
   data,
   apply,
   circuitAnalyses,
   socketBalance,
-  notify,
+  onStartApplianceDrag,
+  onAutoAdapt,
 }: {
   data: ProjectData;
   apply: Apply;
   circuitAnalyses: CircuitAnalysis[];
   socketBalance: SocketBalanceSummary;
-  notify: (message: string) => void;
+  onStartApplianceDrag: (app: ApplianceItem, e: React.PointerEvent) => void;
+  onAutoAdapt: () => void;
 }) {
   const { appliances, circuits, nodes } = data;
   const [name, setName] = useState('');
@@ -41,6 +87,8 @@ export function LoadsPanel({
   const sockets = nodes.filter((n) => n.category.startsWith('socket_'));
   const outlets =
     socketBalance.totalAvailableOutlets1P + socketBalance.totalAvailableOutlets3P;
+  const nodeExists = (id?: string) => Boolean(id && nodes.some((n) => n.id === id));
+  const unassigned = appliances.filter((a) => !nodeExists(a.assignedNodeId));
 
   const submitCustom = (e: React.FormEvent) => {
     e.preventDefault();
@@ -55,49 +103,86 @@ export function LoadsPanel({
     setName('');
   };
 
+  const assign = (applianceId: string, socketId: string | undefined) =>
+    apply((d) => assignAppliance(d, applianceId, socketId));
+
   return (
-    <div className="space-y-4">
-      <section className="space-y-2">
-        <div className="flex items-center justify-between">
-          <h3 className="section-title">Utičnice i trošila</h3>
-          <span className="font-semibold tabular-nums">
-            {appliances.length} / {outlets}
-          </span>
-        </div>
+    <div className="space-y-2">
+      <CollapsibleSection
+        id="trosila-bilanca"
+        title="Utičnice i trošila"
+        summary={`${appliances.length} / ${outlets}`}
+      >
         {!socketBalance.isBalanced && (
           <p className="text-[12px] font-semibold text-err">
             Nedostaje utičnica: {socketBalance.missingOutlets1P + socketBalance.missingOutlets3P}.
           </p>
         )}
-        <button
-          className="btn w-full"
-          onClick={() =>
-            apply((d) => {
-              const result = autoAdaptNetwork(d);
-              if (result.unplaced > 0) {
-                notify(`Nema slobodnog mjesta za ${result.unplaced} utičnica.`);
-              }
-              return result.data;
-            })
-          }
-        >
+        <button className="btn w-full" onClick={onAutoAdapt}>
           <Wand2 className="w-4 h-4" /> Automatski prilagodi mrežu
         </button>
-      </section>
+      </CollapsibleSection>
 
-      <section className="space-y-1.5 pt-3 border-t border-line">
-        <h3 className="section-title">Dodaj uređaj</h3>
-        <div className="max-h-44 overflow-y-auto space-y-1 pr-1">
-          {APPLIANCE_CATALOG_TEMPLATES.map((tpl) => (
-            <button
-              key={tpl.name}
-              className="w-full flex items-center justify-between gap-2 px-2 py-1.5 bg-paper border border-line rounded text-left hover:border-ink"
-              onClick={() => apply((d) => addApplianceFromTemplate(d, tpl))}
-            >
-              <span className="truncate">{tpl.name}</span>
-              <span className="tabular-nums text-muted shrink-0">{tpl.powerWatts} W</span>
-            </button>
-          ))}
+      <CollapsibleSection
+        id="trosila-nedodijeljena"
+        title="Nedodijeljena trošila"
+        summary={String(unassigned.length)}
+      >
+        {unassigned.length === 0 ? (
+          <p className="text-[12px] text-muted">Sva trošila imaju utičnicu.</p>
+        ) : (
+          <p className="text-[12px] text-muted">Povuci trošilo na utičnicu na nacrtu ili je odaberi.</p>
+        )}
+        {unassigned.map((app) => {
+          const Icon = applianceIcon(app);
+          return (
+            <div key={app.id} className="bg-paper border border-line rounded p-2 space-y-1.5">
+              <div
+                className="flex items-center gap-1.5 cursor-grab select-none"
+                style={{ touchAction: 'pan-y' }}
+                data-testid={`trosilo-${app.name}`}
+                onPointerDown={(e) => onStartApplianceDrag(app, e)}
+              >
+                <GripVertical className="w-3.5 h-3.5 text-muted shrink-0" />
+                <Icon className="w-4 h-4 shrink-0" />
+                <span className="flex-1 min-w-0 truncate font-semibold">{app.name}</span>
+                <span className="tabular-nums text-muted">{app.powerWatts} W</span>
+                <button
+                  className="icon-btn"
+                  aria-label={`Obriši ${app.name}`}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => apply((d) => deleteAppliance(d, app.id))}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+              <SocketSelect
+                app={app}
+                sockets={sockets}
+                appliances={appliances}
+                onAssign={(socketId) => assign(app.id, socketId)}
+              />
+            </div>
+          );
+        })}
+      </CollapsibleSection>
+
+      <CollapsibleSection id="trosila-dodaj" title="Dodaj uređaj">
+        <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
+          {APPLIANCE_CATALOG_TEMPLATES.map((tpl) => {
+            const Icon = applianceIcon(tpl);
+            return (
+              <button
+                key={tpl.name}
+                className="w-full flex items-center gap-2 px-2 py-1.5 bg-paper border border-line rounded text-left hover:border-ink"
+                onClick={() => apply((d) => addApplianceFromTemplate(d, tpl))}
+              >
+                <Icon className="w-4 h-4 shrink-0" />
+                <span className="flex-1 min-w-0 truncate">{tpl.name}</span>
+                <span className="tabular-nums text-muted shrink-0">{tpl.powerWatts} W</span>
+              </button>
+            );
+          })}
         </div>
         <form onSubmit={submitCustom} className="flex gap-1.5 pt-1">
           <input
@@ -121,80 +206,53 @@ export function LoadsPanel({
           </button>
         </form>
         {wattsError && <p role="alert" className="text-[12px] font-medium text-err">{wattsError}</p>}
-      </section>
+      </CollapsibleSection>
 
-      <section className="space-y-1.5 pt-3 border-t border-line">
-        <h3 className="section-title">Trošila ({appliances.length})</h3>
-        {appliances.length === 0 && (
-          <p className="text-[12px] text-muted">Još nema trošila.</p>
-        )}
-        {appliances.map((app) => (
-          <div key={app.id} className="bg-paper border border-line rounded p-2 space-y-1.5">
-            <div className="flex items-center gap-2">
-              <span className="flex-1 min-w-0 truncate font-semibold">{app.name}</span>
-              <span className="tabular-nums text-muted">{app.powerWatts} W</span>
-              <button
-                className="icon-btn"
-                aria-label={`Obriši ${app.name}`}
-                onClick={() => apply((d) => deleteAppliance(d, app.id))}
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-            <select
-              className="field"
-              aria-label={`Utičnica za ${app.name}`}
-              value={app.assignedNodeId ?? ''}
-              onChange={(e) =>
-                apply((d) => assignAppliance(d, app.id, e.target.value || undefined))
-              }
-            >
-              <option value="">Nije vezano uz utičnicu</option>
-              {sockets.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.label} · {s.surface === 'ceiling' ? 'Strop' : WALL_META[s.surface].short}
-                </option>
-              ))}
-            </select>
-          </div>
-        ))}
-      </section>
-
-      <section className="space-y-1.5 pt-3 border-t border-line">
-        <div className="flex items-center justify-between">
-          <h3 className="section-title">Strujni krugovi</h3>
-          <button className="btn" onClick={() => apply(addCircuit)}>
-            <Plus className="w-4 h-4" /> Novi krug
+      <CollapsibleSection
+        id="trosila-krugovi"
+        title="Strujni krugovi"
+        summary={String(circuitAnalyses.length)}
+        action={
+          <button className="btn" aria-label="Novi krug" onClick={() => apply(addCircuit)}>
+            <Plus className="w-4 h-4" />
           </button>
-        </div>
+        }
+      >
         {circuitAnalyses.map((ca) => (
-          <CircuitRow
+          <CircuitCard
             key={ca.circuit.id}
             analysis={ca}
             canDelete={circuits.length > 1}
+            nodes={nodes}
             onChange={(patch) => apply((d) => updateCircuit(d, ca.circuit.id, patch))}
             onDelete={() => apply((d) => deleteCircuit(d, ca.circuit.id))}
+            onUnassign={(id) => assign(id, undefined)}
           />
         ))}
-      </section>
+      </CollapsibleSection>
     </div>
   );
 }
 
-function CircuitRow({
+function CircuitCard({
   analysis,
   canDelete,
+  nodes,
   onChange,
   onDelete,
+  onUnassign,
 }: {
   analysis: CircuitAnalysis;
   canDelete: boolean;
+  nodes: ElectricalNode[];
   onChange: (patch: Partial<ElectricalCircuit>) => void;
   onDelete: () => void;
+  onUnassign: (applianceId: string) => void;
 }) {
-  const { circuit, status, utilizationPercent, totalPowerWatts } = analysis;
+  const { circuit, status, utilizationPercent, totalPowerWatts, assignedAppliances } = analysis;
   const barColor =
     status === 'overload' ? 'bg-err' : status === 'warning' ? 'bg-warn' : 'bg-ok';
+  const placed = assignedAppliances.filter((a) => nodes.some((n) => n.id === a.assignedNodeId));
   return (
     <div className="bg-paper border border-line rounded p-2 space-y-1.5">
       <div className="flex items-center gap-2">
@@ -270,6 +328,24 @@ function CircuitRow({
           style={{ width: `${Math.min(100, utilizationPercent)}%` }}
         />
       </div>
+      {placed.map((app) => {
+        const Icon = applianceIcon(app);
+        const socket = nodes.find((n) => n.id === app.assignedNodeId)!;
+        return (
+          <div key={app.id} className="flex items-center gap-1.5 text-[12px]">
+            <Icon className="w-3.5 h-3.5 shrink-0" />
+            <span className="flex-1 min-w-0 truncate">{app.name}</span>
+            <b className="shrink-0">{socket.label.split(' ')[0]}</b>
+            <button
+              aria-label={`Odvoji ${app.name}`}
+              className="shrink-0 text-muted hover:text-ink"
+              onClick={() => onUnassign(app.id)}
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

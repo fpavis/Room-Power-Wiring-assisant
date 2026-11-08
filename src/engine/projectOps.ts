@@ -3,9 +3,11 @@ import {
   ELEMENT_CATALOG,
   INITIAL_APPLIANCES,
   INITIAL_CIRCUITS,
+  INITIAL_FURNITURE,
   INITIAL_NODES,
   INITIAL_OPENINGS,
   INITIAL_ROOM,
+  WALL_META,
 } from '../data/presets';
 import {
   ApplianceItem,
@@ -18,7 +20,17 @@ import {
   WallOpening,
 } from '../types/electrical';
 import { isPointInsideOpening } from './electricalEngine';
-import { getSurfaceSize, isNodeOutsideSurface, roundMm } from './geometry';
+import {
+  circuitVoltageDropPercent,
+  directFeedGroups,
+  hasLightsAndSockets,
+  hasSchukoSockets,
+  isBoxOutsideZone,
+  MIN_CROSS_SECTION,
+  voltageDropLimitPercent,
+} from './rules';
+import { computeRoutedSegments } from './routing';
+import { formatMeters, formatNumber, getSurfaceSize, isNodeOutsideSurface, roundMm } from './geometry';
 import { randomId } from './ids';
 
 /** Every circuit colour has at least 4.5:1 contrast on the white drawing sheet. */
@@ -37,6 +49,7 @@ export function createEmptyProject(): ProjectData {
   return {
     room: { length: 4, width: 3, height: 2.6 },
     openings: [],
+    furniture: [],
     nodes: [],
     appliances: [],
     circuits: [
@@ -70,6 +83,7 @@ export function createExampleProject(): ProjectData {
   return structuredClone({
     room: INITIAL_ROOM,
     openings: INITIAL_OPENINGS,
+    furniture: INITIAL_FURNITURE,
     nodes: INITIAL_NODES,
     circuits: INITIAL_CIRCUITS,
     appliances: INITIAL_APPLIANCES,
@@ -242,17 +256,24 @@ export function groupDevicesUnderNewBox(
       n.circuitId === circuitId &&
       n.surface === wall
   );
-  const x =
-    devices.length > 0
-      ? devices.reduce((sum, d) => sum + d.x, 0) / devices.length
-      : getSurfaceSize(wall, data.room).width / 2;
-  return addNode(
-    data,
-    'junction_box',
-    wall,
-    { x, y: Math.max(0.35, data.room.height - 0.3) },
-    circuitId
+  const y = Math.max(0.35, data.room.height - 0.3);
+  const width = getSurfaceSize(wall, data.room).width;
+  const average =
+    devices.length > 0 ? devices.reduce((sum, d) => sum + d.x, 0) / devices.length : width / 2;
+  // Above the device nearest the group's middle, so that drop is straight.
+  const candidates = [...devices].sort(
+    (a, b) => Math.abs(a.x - average) - Math.abs(b.x - average)
   );
+  const clear = (x: number) =>
+    !isPointInsideOpening(wall, x, y, data.openings, 0.1) &&
+    !data.nodes.some(
+      (n) =>
+        n.surface === wall &&
+        (n.category === 'junction_box' || n.category === 'distribution_board') &&
+        Math.abs(n.x - x) < 0.25
+    );
+  const x = candidates.map((d) => d.x).find(clear) ?? average;
+  return addNode(data, 'junction_box', wall, { x, y }, circuitId);
 }
 
 export function moveNodeInside(data: ProjectData, nodeId: string): ProjectData {
@@ -417,10 +438,10 @@ export function deleteCircuit(data: ProjectData, id: string): ProjectData {
   };
 }
 
-/** Finds a wall position at height `y` clear of openings and other elements. */
+/** Finds a wall position at height `y` clear of openings, furniture and other elements. */
 function findFreeWallSpot(
   y: number,
-  data: Pick<ProjectData, 'room' | 'openings'>,
+  data: Pick<ProjectData, 'room' | 'openings' | 'furniture'>,
   nodes: ElectricalNode[]
 ): { surface: WallId; x: number } | null {
   const walls: WallId[] = ['north', 'east', 'south', 'west'];
@@ -428,7 +449,16 @@ function findFreeWallSpot(
     const { width } = getSurfaceSize(surface, data.room);
     for (let x = 0.3; x <= width - 0.3 + 1e-9; x += 0.1) {
       const candidate = roundMm(x);
+      const behindFurniture = data.furniture.some(
+        (f) =>
+          f.wall === surface &&
+          candidate > f.offsetFromLeft - 0.05 &&
+          candidate < f.offsetFromLeft + f.width + 0.05 &&
+          y > f.bottom - 0.05 &&
+          y < f.bottom + f.height + 0.05
+      );
       const blocked =
+        behindFurniture ||
         isPointInsideOpening(surface, candidate, y, data.openings, 0.12) ||
         nodes.some(
           (n) =>
@@ -442,67 +472,51 @@ function findFreeWallSpot(
   return null;
 }
 
-/**
- * Gives appliances that need it their own circuit and adds missing outlets on free wall
- * space. Returns a new project; appliances that cannot be placed are counted in `unplaced`.
- */
-export function autoAdaptNetwork(data: ProjectData): {
+export interface NetworkAdaptation {
   data: ProjectData;
-  unplaced: number;
-} {
+  /** What applying this would change, in words for the user. */
+  changes: string[];
+  /** Problems the automatic pass cannot solve. */
+  unresolved: string[];
+}
+
+const HIGH_LOAD_PERCENT = 80;
+const MAX_1P_WATTS_ON_20A = 4600;
+const SECTION_STEPS = [1.5, 2.5, 4] as const;
+
+/**
+ * Plans fixes for the network without touching the input: own circuits where needed,
+ * heavily loaded shared circuits split up, missing outlets added on free wall space.
+ */
+export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
   let circuits = [...data.circuits];
   let nodes = [...data.nodes];
   const appliances = data.appliances.map((a) => ({ ...a }));
-  const parent =
-    nodes.find((n) => n.category === 'distribution_board') ??
-    nodes.find((n) => n.category === 'junction_box');
-  let unplaced = 0;
+  const changes: string[] = [];
+  const unresolved: string[] = [];
+  const board = nodes.find((n) => n.category === 'distribution_board');
+  let feeder = board ?? nodes.find((n) => n.category === 'junction_box');
 
+  const shortLabel = (n: ElectricalNode) => n.label.split(' ')[0];
+  const wallName = (surface: WallId) => WALL_META[surface].short;
   const nextSocketLabel = (name: string) =>
     `U-${nextNumber(
       nodes.map((n) => n.label),
       'U'
     )} (${name})`;
+  const circuitOf = (a: ApplianceItem) =>
+    nodes.find((n) => n.id === a.assignedNodeId)?.circuitId ?? a.circuitId;
+  const lightsWatts = (circuitId: string) =>
+    nodes
+      .filter((n) => n.circuitId === circuitId)
+      .reduce((sum, n) => sum + (ELEMENT_CATALOG[n.category]?.defaultPowerWatts ?? 0), 0);
+  const appliancesOn = (circuitId: string) => appliances.filter((a) => circuitOf(a) === circuitId);
+  const capacity = (c: ElectricalCircuit) => c.breakerAmps * 230 * (c.phaseType === '3P' ? 3 : 1);
+  const loadPercent = (c: ElectricalCircuit) =>
+    ((appliancesOn(c.id).reduce((sum, a) => sum + a.powerWatts, 0) + lightsWatts(c.id)) / capacity(c)) * 100;
 
-  for (const app of appliances) {
-    if (!app.requiresDedicatedCircuit && app.powerWatts < 2500) continue;
-    if (appliances.filter((a) => a.circuitId === app.circuitId).length <= 1) continue;
-
-    if (app.assignedNodeId) {
-      const circuit = makeDedicatedCircuit(app);
-      circuits.push(circuit);
-      app.circuitId = circuit.id;
-      nodes = nodes.map((n) =>
-        n.id === app.assignedNodeId ? { ...n, circuitId: circuit.id } : n
-      );
-      continue;
-    }
-
-    const y = app.threePhase ? 0.6 : 0.3;
-    const spot = findFreeWallSpot(y, data, nodes);
-    if (!spot) {
-      unplaced++;
-      continue;
-    }
-    const circuit = makeDedicatedCircuit(app);
-    circuits.push(circuit);
-    const socketId = newId('node');
-    nodes.push({
-      id: socketId,
-      surface: spot.surface,
-      category: app.threePhase ? 'socket_shuko_3p' : 'socket_single',
-      label: nextSocketLabel(app.name),
-      x: spot.x,
-      y,
-      circuitId: circuit.id,
-      parentBoxId: parent?.id,
-    });
-    app.circuitId = circuit.id;
-    app.assignedNodeId = socketId;
-  }
-
-  function makeDedicatedCircuit(app: ApplianceItem): ElectricalCircuit {
-    return {
+  function makeCircuit(app: ApplianceItem): ElectricalCircuit {
+    const circuit: ElectricalCircuit = {
       id: newId('cir'),
       code: nextCircuitCode(circuits),
       name: `Zasebni: ${app.name.slice(0, 24)}`,
@@ -511,25 +525,191 @@ export function autoAdaptNetwork(data: ProjectData): {
       phaseType: app.threePhase ? '3P' : '1P',
       cableCrossSection: 2.5,
       color: unusedColor(circuits),
-      mainJunctionBoxId: parent?.id ?? '',
+      mainJunctionBoxId: feeder?.id ?? '',
     };
+    circuits.push(circuit);
+    return circuit;
   }
 
+  /** Gives an appliance its own circuit, on its own socket. Returns false if there is no room. */
+  function giveOwnCircuit(app: ApplianceItem): boolean {
+    const socket = nodes.find((n) => n.id === app.assignedNodeId);
+    const sharesSocket =
+      socket && appliances.some((a) => a !== app && a.assignedNodeId === socket.id);
+
+    if (socket && !sharesSocket) {
+      const circuit = makeCircuit(app);
+      nodes = nodes.map((n) =>
+        n.id === socket.id ? { ...n, circuitId: circuit.id, parentBoxId: feeder?.id } : n
+      );
+      app.circuitId = circuit.id;
+      changes.push(
+        `Novi krug ${circuit.code} (${circuit.breakerCurve}${circuit.breakerAmps}, 2,5 mm²) za: ${app.name}. Utičnica ${shortLabel(socket)} prelazi na taj krug.`
+      );
+      return true;
+    }
+
+    const y = app.threePhase ? 0.6 : 0.3;
+    const spot = findFreeWallSpot(y, data, nodes);
+    if (!spot) {
+      unresolved.push(`Nema slobodnog mjesta za utičnicu: ${app.name}.`);
+      return false;
+    }
+    const circuit = makeCircuit(app);
+    const added: ElectricalNode = {
+      id: newId('node'),
+      surface: spot.surface,
+      category: app.threePhase ? 'socket_shuko_3p' : 'socket_single',
+      label: nextSocketLabel(app.name),
+      x: spot.x,
+      y,
+      circuitId: circuit.id,
+      parentBoxId: feeder?.id,
+    };
+    nodes.push(added);
+    app.circuitId = circuit.id;
+    app.assignedNodeId = added.id;
+    changes.push(
+      `Novi krug ${circuit.code} (${circuit.breakerCurve}${circuit.breakerAmps}, 2,5 mm²) za: ${app.name}. Nova utičnica ${shortLabel(added)} na zidu ${wallName(spot.surface)}, ${formatMeters(spot.x)} m od kuta.`
+    );
+    return true;
+  }
+
+  // Elements left outside their surface go back onto it
+  for (const node of getOutsideNodes({ ...data, nodes })) {
+    const moved = moveNodeInside({ ...data, nodes }, node.id);
+    nodes = moved.nodes;
+    changes.push(`${shortLabel(node)}: premješta se natrag unutar plohe.`);
+  }
+
+  // Every installation needs a board to start from
+  if (nodes.length > 0 && !board) {
+    const spot = findFreeWallSpot(1.65, data, nodes);
+    if (spot && circuits[0]) {
+      const created = addNode(
+        { ...data, nodes, circuits, appliances },
+        'distribution_board',
+        spot.surface,
+        { x: spot.x, y: 1.65 },
+        circuits[0].id
+      );
+      if (created) {
+        nodes = created.data.nodes;
+        feeder = nodes.find((n) => n.id === created.nodeId);
+        changes.push(`Novi razvodni ormar na zidu ${wallName(spot.surface)}, ${formatMeters(spot.x)} m od kuta.`);
+      }
+    } else {
+      unresolved.push('Nema slobodnog mjesta za razvodni ormar.');
+    }
+  }
+
+  // A Schuko socket is rated 16 A, so its circuit may not be fused higher
+  circuits = circuits.map((c) => {
+    if (c.breakerAmps <= 16 || !hasSchukoSockets(c.id, nodes)) return c;
+    changes.push(`${c.code}: osigurač se smanjuje na 16 A jer je Šuko utičnica nazivno 16 A.`);
+    return { ...c, breakerAmps: 16 as const };
+  });
+
+  // More appliances on a socket than it has places
+  for (const socket of nodes.filter((n) => n.category.startsWith('socket_'))) {
+    const slots = ELEMENT_CATALOG[socket.category].outletsProvided;
+    const excess = appliances
+      .filter((a) => a.assignedNodeId === socket.id)
+      .sort((a, b) => a.powerWatts - b.powerWatts)
+      .slice(slots);
+    for (const app of excess) {
+      const spot = findFreeWallSpot(0.3, data, nodes);
+      if (!spot) {
+        unresolved.push(`Nema slobodnog mjesta za utičnicu: ${app.name}.`);
+        continue;
+      }
+      const added: ElectricalNode = {
+        id: newId('node'),
+        surface: spot.surface,
+        category: 'socket_single',
+        label: nextSocketLabel(app.name),
+        x: spot.x,
+        y: 0.3,
+        circuitId: socket.circuitId,
+        parentBoxId: socket.parentBoxId,
+      };
+      nodes.push(added);
+      app.assignedNodeId = added.id;
+      changes.push(
+        `Utičnica ${shortLabel(socket)} ima premalo mjesta. Nova utičnica ${shortLabel(added)} na zidu ${wallName(spot.surface)} za: ${app.name}.`
+      );
+    }
+  }
+
+  // 1. Appliances that need their own circuit
+  for (const app of appliances) {
+    if (!app.requiresDedicatedCircuit && app.powerWatts < 2500) continue;
+    if (appliancesOn(circuitOf(app)).length <= 1) continue;
+    giveOwnCircuit(app);
+  }
+
+  // 2. Shared circuits under high load: move the strongest appliance off first
+  for (const circuit of [...circuits]) {
+    while (loadPercent(circuit) >= HIGH_LOAD_PERCENT) {
+      const onCircuit = appliancesOn(circuit.id).sort((a, b) => b.powerWatts - a.powerWatts);
+      if (onCircuit.length === 0) break;
+      if (onCircuit.length === 1 && lightsWatts(circuit.id) === 0) break;
+      if (!giveOwnCircuit(onCircuit[0])) break;
+    }
+  }
+
+  // 3. A single appliance close to or over its breaker: a stronger fixed connection
+  circuits = circuits.map((circuit) => {
+    const percent = loadPercent(circuit);
+    if (percent < HIGH_LOAD_PERCENT) return circuit;
+    const onCircuit = appliancesOn(circuit.id);
+    const total = onCircuit.reduce((sum, a) => sum + a.powerWatts, 0);
+    if (onCircuit.length !== 1) {
+      if (percent > 100) {
+        unresolved.push(`${circuit.code}: krug je preopterećen, a trošila se ne mogu razdvojiti.`);
+      }
+      return circuit;
+    }
+    const app = onCircuit[0];
+    const socket = nodes.find((n) => n.id === app.assignedNodeId);
+    const needsThreePhase = `${circuit.code}: ${app.name} (${total} W) traži trofazni priključak ili ručnu izmjenu.`;
+    if (circuit.phaseType !== '1P' || circuit.breakerAmps >= 20 || total > MAX_1P_WATTS_ON_20A) {
+      unresolved.push(needsThreePhase);
+      return circuit;
+    }
+    if (!socket) {
+      unresolved.push(`${circuit.code}: ${app.name} prvo treba dodijeliti utičnici.`);
+      return circuit;
+    }
+    nodes = nodes.map((n) => (n.id === socket.id ? { ...n, category: 'socket_fixed_1p' as const } : n));
+    const after = (total / (20 * 230)) * 100;
+    changes.push(
+      `${circuit.code}: ${shortLabel(socket)} postaje fiksni priključak, osigurač 20 A, presjek 4,0 mm². Opterećenje pada s ${formatNumber(percent, 0)} % na ${formatNumber(after, 0)} %.`
+    );
+    if (after >= HIGH_LOAD_PERCENT) unresolved.push(needsThreePhase);
+    return { ...circuit, breakerAmps: 20 as const, cableCrossSection: 4 as const };
+  });
+
+  // 4. Missing outlets
   const outlets = nodes.reduce(
     (acc, n) =>
       acc +
-      (n.category === 'socket_single' ? 1 : n.category === 'socket_double' ? 2 : 0),
+      (n.category === 'socket_single' || n.category === 'socket_fixed_1p'
+        ? 1
+        : n.category === 'socket_double'
+        ? 2
+        : 0),
     0
   );
   let deficit = appliances.filter((a) => !a.threePhase).length - outlets;
   while (deficit > 0 && circuits[0]) {
     const spot = findFreeWallSpot(0.3, data, nodes);
     if (!spot) {
-      unplaced += deficit;
+      unresolved.push(`Nema slobodnog mjesta za još ${deficit} utičničnih mjesta.`);
       break;
     }
     const isDouble = deficit >= 2;
-    nodes.push({
+    const added: ElectricalNode = {
       id: newId('node'),
       surface: spot.surface,
       category: isDouble ? 'socket_double' : 'socket_single',
@@ -537,15 +717,134 @@ export function autoAdaptNetwork(data: ProjectData): {
       x: spot.x,
       y: 0.3,
       circuitId: circuits[0].id,
-      parentBoxId: parent?.id,
-    });
+      parentBoxId:
+        nodes.find(
+          (n) =>
+            n.category === 'junction_box' &&
+            n.surface === spot.surface &&
+            n.circuitId === circuits[0].id
+        )?.id ?? feeder?.id,
+    };
+    nodes.push(added);
+    changes.push(
+      `Nova ${isDouble ? 'dvostruka' : 'jednostruka'} utičnica ${shortLabel(added)} na zidu ${wallName(spot.surface)}, ${formatMeters(spot.x)} m od kuta, na krugu ${circuits[0].code}.`
+    );
     deficit -= isDouble ? 2 : 1;
   }
 
-  circuits = circuits.map((c) =>
-    c.breakerAmps >= 16 && c.cableCrossSection < 2.5
-      ? { ...c, cableCrossSection: 2.5 }
-      : c
-  );
-  return { data: { ...data, circuits, nodes, appliances }, unplaced };
+  // 5. Lighting away from socket circuits
+  for (const circuit of [...circuits]) {
+    if (!hasLightsAndSockets(circuit.id, nodes)) continue;
+    const isLightingOnly = (c: ElectricalCircuit) => {
+      const members = nodes.filter((n) => n.circuitId === c.id);
+      return (
+        members.length > 0 &&
+        members.every(
+          (n) =>
+            n.category.startsWith('light_') ||
+            n.category.startsWith('switch_') ||
+            n.category === 'junction_box'
+        )
+      );
+    };
+    let target = circuits.find((c) => c.breakerAmps === 10 && isLightingOnly(c));
+    if (!target) {
+      target = {
+        id: newId('cir'),
+        code: nextCircuitCode(circuits),
+        name: 'Rasvjeta',
+        breakerAmps: 10,
+        breakerCurve: 'B',
+        phaseType: '1P',
+        cableCrossSection: 1.5,
+        color: unusedColor(circuits),
+        mainJunctionBoxId: feeder?.id ?? '',
+      };
+      circuits.push(target);
+    }
+    const lightingId = target.id;
+    const moved = nodes.filter(
+      (n) =>
+        n.circuitId === circuit.id &&
+        (n.category.startsWith('light_') || n.category.startsWith('switch_'))
+    );
+    nodes = nodes.map((n) =>
+      moved.some((m) => m.id === n.id)
+        ? { ...n, circuitId: lightingId, parentBoxId: feeder?.id }
+        : n
+    );
+    changes.push(
+      `${circuit.code}: rasvjeta i prekidači (${moved.map(shortLabel).join(', ')}) prelaze na krug ${target.code}.`
+    );
+  }
+
+  // 6. Junction boxes into the upper zone
+  nodes = nodes.map((n) => {
+    if (
+      n.category !== 'junction_box' ||
+      n.surface === 'ceiling' ||
+      !isBoxOutsideZone(n.y, data.room.height)
+    ) {
+      return n;
+    }
+    const y = roundMm(data.room.height - 0.3);
+    if (isPointInsideOpening(n.surface, n.x, y, data.openings, 0.1)) {
+      unresolved.push(`${shortLabel(n)}: iznad nje je otvor, premjesti kutiju ručno.`);
+      return n;
+    }
+    changes.push(`${shortLabel(n)}: premješta se u gornju instalacijsku zonu, ${formatMeters(y)} m od poda.`);
+    return { ...n, y };
+  });
+
+  // 7. A junction box where several elements run straight from the board
+  for (const group of directFeedGroups({ nodes, circuits, appliances })) {
+    if (group.surface === 'ceiling') continue;
+    const created = groupDevicesUnderNewBox(
+      { ...data, nodes, circuits, appliances },
+      group.circuitId,
+      group.surface
+    );
+    if (!created) continue;
+    nodes = created.data.nodes;
+    const box = nodes.find((n) => n.id === created.nodeId)!;
+    const code = circuits.find((c) => c.id === group.circuitId)?.code;
+    changes.push(
+      `Nova razvodna kutija ${shortLabel(box)} na zidu ${wallName(group.surface as WallId)} za ${group.count} elementa kruga ${code}.`
+    );
+  }
+
+  // 8. Conductor size: at least what the breaker needs, more if the voltage drop asks for it
+  circuits = circuits.map((c) => {
+    const minimum = MIN_CROSS_SECTION[c.breakerAmps];
+    if (minimum && c.cableCrossSection < minimum) {
+      changes.push(`${c.code}: presjek se povećava na ${formatNumber(minimum, 1)} mm² zbog osigurača ${c.breakerAmps} A.`);
+      return { ...c, cableCrossSection: minimum as ElectricalCircuit['cableCrossSection'] };
+    }
+    return c;
+  });
+
+  const planned: ProjectData = { ...data, circuits, nodes, appliances };
+  const segments = computeRoutedSegments(planned.room, nodes, circuits, planned.openings);
+  circuits = circuits.map((c) => {
+    const power =
+      appliancesOn(c.id).reduce((sum, a) => sum + a.powerWatts, 0) + lightsWatts(c.id);
+    const limit = voltageDropLimitPercent(c.id, nodes);
+    const dropWith = (section: ElectricalCircuit['cableCrossSection']) =>
+      circuitVoltageDropPercent(
+        c.id,
+        power,
+        { ...planned, circuits: planned.circuits.map((x) => (x.id === c.id ? { ...x, cableCrossSection: section } : x)) },
+        segments
+      );
+    if (dropWith(c.cableCrossSection) <= limit) return c;
+    const enough = SECTION_STEPS.find((section) => section > c.cableCrossSection && dropWith(section) <= limit);
+    if (!enough) {
+      unresolved.push(`${c.code}: pad napona prelazi ${limit} % i uz presjek 4,0 mm². Skrati vod ili razdvoji krug.`);
+      return c;
+    }
+    changes.push(`${c.code}: presjek se povećava na ${formatNumber(enough, 1)} mm² zbog pada napona.`);
+    return { ...c, cableCrossSection: enough };
+  });
+
+  return { data: { ...data, circuits, nodes, appliances }, changes, unresolved };
 }

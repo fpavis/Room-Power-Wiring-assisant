@@ -1,4 +1,5 @@
-import { RoomDimensions, WallOpening } from '../types/electrical';
+import { FurnitureItem, RoomDimensions, WallOpening } from '../types/electrical';
+import { furnitureBlockingOpening } from './furniture';
 import { formatMeters, getSurfaceSize } from './geometry';
 
 export const ROOM_LIMITS = {
@@ -23,7 +24,8 @@ export type OpeningErrors = Partial<Record<OpeningField, string>>;
 
 export function validateOpening(
   op: Pick<WallOpening, 'wall' | 'type' | OpeningField>,
-  room: RoomDimensions
+  room: RoomDimensions,
+  furniture: FurnitureItem[] = []
 ): OpeningErrors {
   const errors: OpeningErrors = {};
   const wallWidth = getSurfaceSize(op.wall, room).width;
@@ -49,6 +51,10 @@ export function validateOpening(
     errors.sillHeight = 'Parapet ne može biti negativan.';
   } else if (!errors.height && op.sillHeight + op.height > room.height + 1e-9) {
     errors.height = `Otvor prelazi strop. Visina zida je ${formatMeters(room.height)} m.`;
+  }
+  if (Object.keys(errors).length === 0) {
+    const blocking = furnitureBlockingOpening(op, room, furniture);
+    if (blocking) errors.offsetFromLeft = `Na tom mjestu je namještaj: ${blocking.name}.`;
   }
   return errors;
 }

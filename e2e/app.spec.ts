@@ -31,22 +31,185 @@ test('prvo otvaranje prikazuje primjer na hrvatskom', async ({ page }) => {
 
 test('nacrt ima isto mjerilo u širini i visini', async ({ page }) => {
   const svg = page.locator('svg[data-scale]');
-  const scale = Number(await svg.getAttribute('data-scale'));
-  expect(scale).toBeGreaterThan(20);
+  await expect.poll(async () => Number(await svg.getAttribute('data-scale'))).toBeGreaterThan(20);
   const box = await page.getByTestId('mjerna-traka').boundingBox();
   expect(box!.width).toBeGreaterThan(40);
 
-  const ratios = await svg.evaluate((el) =>
-    [...el.querySelectorAll('rect[stroke="#111111"][fill="none"]')].map((r) => {
+  // Mjerilo i dimenzije čitaju se u istom trenutku, da promjena veličine ne utječe na rezultat.
+  const { scale, ratios } = await svg.evaluate((el) => ({
+    scale: Number(el.getAttribute('data-scale')),
+    ratios: [...el.querySelectorAll('rect[stroke="#111111"][fill="none"]')].map((r) => {
       const bb = (r as SVGRectElement).getBBox();
       return [bb.width, bb.height];
-    })
-  );
+    }),
+  }));
   // Zidovi 2,90 i 5,90 m, strop 5,90 × 2,90 m, visina 2,60 m
   const sizes = ratios.map(([w, h]) => [w / scale, h / scale]);
   expect(sizes.some(([w, h]) => Math.abs(w - 2.9) < 1e-3 && Math.abs(h - 2.6) < 1e-3)).toBe(true);
   expect(sizes.some(([w, h]) => Math.abs(w - 5.9) < 1e-3 && Math.abs(h - 2.6) < 1e-3)).toBe(true);
   expect(sizes.some(([w, h]) => Math.abs(w - 5.9) < 1e-3 && Math.abs(h - 2.9) < 1e-3)).toBe(true);
+});
+
+test('kotačić zumira oko pokazivača, povlačenje podloge pomiče nacrt', async ({ page }) => {
+  const svg = page.locator('svg[data-scale]');
+  const area = (await page.getByTestId('nacrt').boundingBox())!;
+  const before = Number(await svg.getAttribute('data-scale'));
+  const box1 = (await page.getByTestId('element-U-8').locator('rect').boundingBox())!;
+  await page.mouse.move(box1.x, box1.y);
+  await page.mouse.wheel(0, -300);
+  await expect.poll(async () => Number(await svg.getAttribute('data-scale'))).toBeGreaterThan(before * 1.3);
+  const box2 = (await page.getByTestId('element-U-8').locator('rect').boundingBox())!;
+  expect(Math.abs(box2.x - box1.x)).toBeLessThan(3);
+  expect(Math.abs(box2.y - box1.y)).toBeLessThan(3);
+
+  const start = await svg.evaluate((el) => el.style.transform);
+  await page.mouse.move(area.x + 10, area.y + area.height - 80);
+  await page.mouse.down();
+  await page.mouse.move(area.x + 70, area.y + area.height - 50, { steps: 4 });
+  await page.mouse.up();
+  expect(await svg.evaluate((el) => el.style.transform)).not.toBe(start);
+});
+
+test('vrata se povlače po podu i zaključaju, kote su vidljive', async ({ page }) => {
+  await step(page, '1 Prostorija').click();
+  const door = page.getByTestId('otvor-door-west').locator('rect');
+  const box = (await door.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 8, box.y + box.height / 2 - 60, { steps: 6 });
+  await expect(page.getByTestId('otvor-status')).toContainText('Vrata do poda');
+  await page.mouse.up();
+  await expect(page.getByTestId('otvor-status')).toHaveCount(0);
+  const after = (await door.boundingBox())!;
+  expect(after.x).toBeGreaterThan(box.x + 4);
+  expect(after.y + after.height).toBeCloseTo(box.y + box.height, 0);
+  await page.getByRole('button', { name: 'Poništi' }).click();
+  expect((await door.boundingBox())!.x).toBeCloseTo(box.x, 0);
+});
+
+test('namještaj se dodaje, spaja i ne ide preko vrata', async ({ page }) => {
+  await step(page, '1 Prostorija').click();
+  const add = async (room: string, name: RegExp) => {
+    await page.getByRole('button', { name: 'Dodaj novi element' }).click();
+    await page.getByRole('button', { name: room, exact: true }).click();
+    await page.getByRole('button', { name }).click();
+    await page.getByLabel('Zid elementa').selectOption('north');
+    await page.getByRole('button', { name: 'Dodaj element', exact: true }).click();
+  };
+  await add('Kuhinja', /^Hladnjak\s*60/);
+  await add('Ostalo', /^Ormar 100/);
+  const fridge = page.getByTestId('namjestaj-Hladnjak').locator('rect');
+  const wardrobe = page.getByTestId('namjestaj-Ormar 100').locator('rect');
+  const a = (await fridge.boundingBox())!;
+  const b = (await wardrobe.boundingBox())!;
+  // Stoje jedan uz drugi
+  expect(Math.abs(a.x + a.width - b.x)).toBeLessThan(1.5);
+
+  // Povlačenje preko susjeda se odbija i element ostaje gdje je bio
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(a.x + a.width / 2, b.y + b.height / 2, { steps: 6 });
+  await expect(page.getByTestId('otvor-status')).toContainText('Preklapa');
+  await page.mouse.up();
+  expect((await wardrobe.boundingBox())!.x).toBeCloseTo(b.x, 0);
+
+  // Sloj se može sakriti
+  await page.getByRole('button', { name: 'Slojevi' }).click();
+  await page.getByLabel('Namještaj').uncheck();
+  await expect(page.getByTestId('namjestaj-Hladnjak')).toHaveCount(0);
+});
+
+test('kategorija se sklapa, ostaje vidljiva i pamti se', async ({ page }) => {
+  await step(page, '1 Prostorija').click();
+  const header = page.getByTestId('sekcija-prostorija-otvori');
+  await expect(page.getByRole('button', { name: 'Dodaj', exact: true })).toBeVisible();
+  await header.click();
+  await expect(page.getByRole('button', { name: 'Dodaj', exact: true })).toHaveCount(0);
+  await expect(header).toBeVisible();
+  await expect(header).toHaveAttribute('aria-expanded', 'false');
+  await expect(header).toContainText('3');
+  await page.reload();
+  await expect(page.getByTestId('nacrt')).toBeVisible();
+  await step(page, '1 Prostorija').click();
+  await expect(page.getByTestId('sekcija-prostorija-otvori')).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('3D prikaz s namještajem radi bez grešaka', async ({ page }) => {
+  await page.getByRole('button', { name: '3D' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+  await page.waitForTimeout(400);
+  await page.getByRole('button', { name: 'Slojevi' }).click();
+  await page.getByLabel('Namještaj').uncheck();
+  await page.waitForTimeout(200);
+  await page.getByLabel('Namještaj').check();
+  await page.waitForTimeout(200);
+});
+
+test('katalog vodi od izbora preko prilagodbe do potvrde', async ({ page }) => {
+  await step(page, '1 Prostorija').click();
+  const before = await page.locator('[data-testid^=namjestaj-]').count();
+  await page.getByRole('button', { name: 'Dodaj novi element' }).click();
+  await page.getByRole('button', { name: 'Dnevni boravak', exact: true }).click();
+  await page.getByRole('button', { name: /^Viseći regal 120/ }).click();
+  await expect(page.locator('[data-testid^=namjestaj-]')).toHaveCount(before);
+  await page.getByLabel('Širina', { exact: true }).fill('1,1');
+  await page.getByLabel('Širina', { exact: true }).press('Enter');
+  await page.getByLabel('Zid elementa').selectOption('north');
+  await page.getByRole('button', { name: 'Dodaj i nastavi' }).click();
+  await expect(page.locator('[data-testid^=namjestaj-]')).toHaveCount(before + 1);
+  await expect(page.getByRole('button', { name: /^Viseći regal 80/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Odustani' }).click();
+  await expect(page.getByTestId('namjestaj-Viseći regal 120').locator('title')).toContainText('1,10 × 0,35 × 0,30');
+});
+
+test('obavijest o pećnici nudi rješenje koje je stvarno uklanja', async ({ page }) => {
+  await expect(page.locator('footer')).toContainText('SK-3 87');
+  await step(page, '4 Provjera i ispis').click();
+  await expect(page.getByTestId('nacrt').locator('..').locator('..')).toBeVisible();
+  await expect(page.getByText(/Rješenje: fiksni priključak/)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Prikaži rješenja' }).click();
+  await expect(page.getByTestId('promjene-mreze')).toContainText('fiksni priključak');
+  await page.getByRole('button', { name: 'Odustani' }).click();
+  await expect(page.locator('footer')).toContainText('SK-3 87');
+
+  await page.getByRole('button', { name: 'Prikaži rješenja' }).click();
+  await page.getByRole('button', { name: 'Primijeni' }).click();
+  await expect(page.locator('footer')).not.toContainText('SK-3');
+  await expect(page.getByRole('button', { name: 'Prikaži rješenja' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Poništi' }).click();
+  await expect(page.locator('footer')).toContainText('SK-3 87');
+});
+
+test('tipka u koraku trošila traži potvrdu i ispisuje promjene', async ({ page }) => {
+  await step(page, '3 Trošila i krugovi').click();
+  await page.getByRole('button', { name: /^Ugradbena pećnica\s*3200/ }).click();
+  const before = await page.locator('[data-testid^=element-]').count();
+  await page.getByRole('button', { name: 'Automatski prilagodi mrežu' }).click();
+  await expect(page.getByTestId('promjene-mreze')).toContainText('Ugradbena pećnica');
+  await page.getByRole('button', { name: 'Odustani' }).click();
+  await expect(page.locator('[data-testid^=element-]')).toHaveCount(before);
+  await page.getByRole('button', { name: 'Automatski prilagodi mrežu' }).click();
+  await page.getByRole('button', { name: 'Primijeni' }).click();
+  await expect(page.locator('[data-testid^=element-]')).toHaveCount(before + 1);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('trošilo se dodjeljuje povlačenjem na utičnicu i vidi se kao tag', async ({ page }) => {
+  await step(page, '3 Trošila i krugovi').click();
+  await page.getByRole('button', { name: /Mikrovalna/ }).click();
+  const row = page.getByTestId('trosilo-Mikrovalna pećnica');
+  await expect(row).toBeVisible();
+  const from = (await row.boundingBox())!;
+  const socket = (await page.getByTestId('element-U-8').locator('rect').boundingBox())!;
+  await page.mouse.move(from.x + 40, from.y + 8);
+  await page.mouse.down();
+  await page.mouse.move(socket.x + 2, socket.y + 2, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.getByTestId('tag-U-8')).toBeVisible();
+  await expect(row).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Odvoji Mikrovalna pećnica' }).first()).toBeVisible();
 });
 
 test('zum ne deformira nacrt', async ({ page }) => {
@@ -80,6 +243,8 @@ test('unos dimenzija zadržava upisano i javlja grešku', async ({ page }) => {
 
 test('otvor koji ne stane ne može se dodati, a ispravan ima visinu i parapet', async ({ page }) => {
   await step(page, '1 Prostorija').click();
+  await expect(page.getByLabel('Od lijevog kuta (m)')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Dodaj', exact: true }).click();
   const offset = page.getByLabel('Od lijevog kuta (m)');
   await offset.fill('9');
   await offset.press('Enter');
@@ -88,12 +253,13 @@ test('otvor koji ne stane ne može se dodati, a ispravan ima visinu i parapet', 
 
   await offset.fill('0,4');
   await offset.press('Enter');
-  await page.getByLabel('Visina (m)').nth(1).fill('1,25');
+  await page.getByLabel('Visina (m)', { exact: true }).nth(1).fill('1,25');
   await page.getByLabel('Parapet od poda (m)').fill('1,1');
   await page.getByLabel('Parapet od poda (m)').press('Enter');
   await page.getByRole('button', { name: 'Dodaj na zid' }).click();
   await expect(page.locator('[data-testid=nacrt]')).toContainText('Prozor');
-  await expect(page.getByText('Otvori (4)')).toBeVisible();
+  await expect(page.getByTestId('sekcija-prostorija-otvori')).toContainText('4');
+  await expect(page.getByLabel('Od lijevog kuta (m)')).toHaveCount(0);
   await expect(page.getByText('1,20 × 1,25 m')).toBeVisible();
 });
 
@@ -250,6 +416,15 @@ test('ispis koristi točne milimetre', async ({ page }) => {
   await expect.poll(() => page.evaluate(() => (window as unknown as { printed?: boolean }).printed)).toBe(true);
 
   await page.emulateMedia({ media: 'print' });
+  const padding = await page.locator('.print-page').first().evaluate((el) => {
+    const style = getComputedStyle(el);
+    return [style.paddingLeft, style.paddingTop, style.paddingRight, style.paddingBottom].map(parseFloat);
+  });
+  const mm = 96 / 25.4;
+  expect(padding[0]).toBeCloseTo(15 * mm, 0);
+  expect(padding[1]).toBeCloseTo(12 * mm, 0);
+  expect(padding[2]).toBeCloseTo(10 * mm, 0);
+  expect(padding[3]).toBeCloseTo(12 * mm, 0);
   await expect(page.getByText('Mjerilo 1:100')).toBeVisible();
   await expect(page.getByText('Mjerilo 1:25').first()).toBeVisible();
   const bar = await page.getByText('5 cm na papiru').first().evaluate((el) => {

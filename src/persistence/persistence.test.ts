@@ -76,6 +76,26 @@ describe('datoteka projekta', () => {
     expect(() => parseProjectFile(text)).toThrow(ProjectFileError);
   });
 
+  it('stariji projekt bez namještaja otvara se s praznim slojem', () => {
+    const { furniture: _none, ...old } = createEmptyProject();
+    const text = JSON.stringify({ format: 'elektroplan', schemaVersion: 1, name: 'Stari', data: old });
+    expect(parseProjectFile(text).data.furniture).toEqual([]);
+  });
+
+  it('stariji namještaj bez dubine dobiva dubinu iz kataloga', () => {
+    const data = {
+      ...createEmptyProject(),
+      furniture: [
+        { id: 'a', wall: 'north', name: 'Viseći ormarić', offsetFromLeft: 0, width: 0.6, height: 0.7, bottom: 1.45 },
+        { id: 'b', wall: 'north', name: 'Nešto nepoznato', offsetFromLeft: 1, width: 0.6, height: 0.7, bottom: 0 },
+      ],
+    };
+    const text = JSON.stringify({ format: 'elektroplan', schemaVersion: 1, data });
+    const parsed = parseProjectFile(text).data.furniture;
+    expect(parsed[0].depth).toBeCloseTo(0.35, 3);
+    expect(parsed[1].depth).toBeCloseTo(0.6, 3);
+  });
+
   it('element na nepostojećem krugu se odbija', () => {
     const data = createExampleProject();
     data.nodes[0].circuitId = 'nema';

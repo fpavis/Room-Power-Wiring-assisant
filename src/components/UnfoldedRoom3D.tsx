@@ -16,6 +16,7 @@ import {
 import {
   ElectricalCircuit,
   ElectricalNode,
+  FurnitureItem,
   RoomDimensions,
   RoutedSegment,
   SurfaceId,
@@ -29,6 +30,8 @@ interface UnfoldedRoom3DProps {
   nodes: ElectricalNode[];
   circuits: ElectricalCircuit[];
   segments: RoutedSegment[];
+  furniture: FurnitureItem[];
+  showFurniture: boolean;
   unfoldTarget: number; // 0 = 3D closed room, 1 = 4 walls in a row + ceiling above junction box wall
   showWireConductors: boolean;
   showInstallZones: boolean;
@@ -91,6 +94,58 @@ function createTextLabelSprite(
   sprite.scale.set(0.45, 0.17, 1);
   sprite.renderOrder = 20;
   return sprite;
+}
+
+/** Translucent box standing against the wall; local z points into the room. */
+function buildFurnitureMesh(item: FurnitureItem): THREE.Group {
+  const group = new THREE.Group();
+  const geometry = new THREE.BoxGeometry(item.width, item.height, item.depth);
+  const body = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({
+      color: 0x9e9e98,
+      transparent: true,
+      opacity: 0.5,
+      roughness: 0.85,
+      depthWrite: false,
+    })
+  );
+  group.add(body);
+  group.add(
+    new THREE.LineSegments(
+      new THREE.EdgesGeometry(geometry),
+      new THREE.LineBasicMaterial({ color: 0x7c7c76, transparent: true, opacity: 0.8 })
+    )
+  );
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 96;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#6F6F6A';
+  ctx.font = '600 48px "Plus Jakarta Sans", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(item.name, 256, 48, 500);
+  const labelWidth = Math.min(item.width * 0.92, 1);
+  const labelHeight = (labelWidth * 96) / 512;
+  if (item.height >= labelHeight) {
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const label = new THREE.Mesh(
+      new THREE.PlaneGeometry(labelWidth, labelHeight),
+      new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false })
+    );
+    label.position.z = item.depth / 2 + 0.003;
+    group.add(label);
+  }
+
+  group.position.set(
+    item.offsetFromLeft + item.width / 2,
+    item.bottom + item.height / 2,
+    item.depth / 2 + 0.002
+  );
+  return group;
 }
 
 function buildProceduralNodeMesh(
@@ -268,6 +323,8 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
   nodes,
   circuits,
   segments,
+  furniture,
+  showFurniture,
   unfoldTarget,
   showWireConductors,
   showInstallZones,
@@ -337,6 +394,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
   const contentRootRef = useRef<THREE.Group | null>(null);
   const clickableMeshesRef = useRef<THREE.Object3D[]>([]);
+  const wallSlabsRef = useRef<{ mesh: THREE.Mesh; material: THREE.MeshStandardMaterial }[]>([]);
 
   useEffect(() => {
     const container = mountRef.current;
@@ -451,6 +509,9 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
     const clock = new THREE.Clock();
     let animId = 0;
+    const wallPosition = new THREE.Vector3();
+    const wallNormal = new THREE.Vector3();
+    const toCamera = new THREE.Vector3();
 
     const animate = () => {
       animId = requestAnimationFrame(animate);
@@ -487,6 +548,23 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
       }
 
       controls.update();
+
+      // A wall seen from outside fades, so the room and its furniture stay visible.
+      scene.updateMatrixWorld();
+      for (const { mesh, material } of wallSlabsRef.current) {
+        mesh.getWorldPosition(wallPosition);
+        wallNormal.set(0, 0, 1).transformDirection(mesh.matrixWorld);
+        const seenFromOutside =
+          wallNormal.dot(toCamera.copy(camera.position).sub(wallPosition)) < 0;
+        material.opacity = THREE.MathUtils.damp(
+          material.opacity,
+          seenFromOutside ? 0.08 : 0.92,
+          8,
+          dt
+        );
+        material.depthWrite = !seenFromOutside;
+      }
+
       renderer.render(scene, camera);
     };
     animate();
@@ -510,6 +588,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
       contentRoot.remove(contentRoot.children[0]);
     }
     clickableMeshesRef.current = [];
+    wallSlabsRef.current = [];
 
     const { length: L, width: W, height: H } = room;
 
@@ -555,6 +634,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
       slabMesh.position.set(wallWidth / 2, wallHeight / 2, -0.02);
       slabMesh.userData = { surfaceId: wallId };
       group.add(slabMesh);
+      wallSlabsRef.current.push({ mesh: slabMesh, material: slabMat });
       clickableMeshesRef.current.push(slabMesh);
 
       const borderLines = new THREE.LineSegments(
@@ -618,6 +698,12 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
         const opMesh = new THREE.Mesh(opGeo, opMat);
         opMesh.position.set(centerX, centerY, 0);
         group.add(opMesh);
+      }
+
+      if (showFurniture) {
+        for (const item of furniture.filter((f) => f.wall === wallId)) {
+          group.add(buildFurnitureMesh(item));
+        }
       }
 
       // Nodes
@@ -847,6 +933,8 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
     showInstallZones,
     selectedNodeId,
     activeCircuitFilter,
+    furniture,
+    showFurniture,
   ]);
 
   return (
