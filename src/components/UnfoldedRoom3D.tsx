@@ -5,6 +5,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { CONDUCTOR_META, ELEMENT_CATALOG, WALL_META } from '../data/presets';
 import {
   getOrderedWallsAroundCenter,
+  OppositeSide,
   getPrimaryJunctionBoxWall,
 } from '../engine/electricalEngine';
 import {
@@ -32,6 +33,7 @@ interface UnfoldedRoom3DProps {
   segments: RoutedSegment[];
   furniture: FurnitureItem[];
   showFurniture: boolean;
+  oppositeSide: OppositeSide;
   unfoldTarget: number; // 0 = 3D closed room, 1 = 4 walls in a row + ceiling above junction box wall
   showWireConductors: boolean;
   showInstallZones: boolean;
@@ -325,6 +327,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
   segments,
   furniture,
   showFurniture,
+  oppositeSide,
   unfoldTarget,
   showWireConductors,
   showInstallZones,
@@ -387,6 +390,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
     leftHinge?: THREE.Group;
     rightHinge?: THREE.Group;
     oppositeHinge?: THREE.Group;
+    oppositeSign?: number;
     ceilingHinge?: THREE.Group;
     floorMesh?: THREE.Mesh;
     ceilingMat?: THREE.MeshStandardMaterial;
@@ -536,7 +540,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
         pivots.rightHinge.rotation.y = -(1 - u) * halfPi;
       }
       if (pivots.oppositeHinge) {
-        pivots.oppositeHinge.rotation.y = -(1 - u) * halfPi;
+        pivots.oppositeHinge.rotation.y = (pivots.oppositeSign ?? -1) * (1 - u) * halfPi;
       }
       if (pivots.ceilingHinge) {
         // When u = 0, ceiling folds 90 deg forward over the room (+halfPi around X).
@@ -806,9 +810,16 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
 
     // 4. Opposite Wall hinged at the RIGHT edge (x = rightW) of Right Wall — continues to the RIGHT!
     const oppositeHinge = new THREE.Group();
-    oppositeHinge.position.set(rightW, 0, 0);
-    rightHinge.add(oppositeHinge);
     const oppositeContent = populateWallContent(oppositeWall, oppW, H);
+    if (oppositeSide === 'left') {
+      // Hinged on the far edge of the left wall, so it unfolds to the far left.
+      oppositeHinge.position.set(-leftW, 0, 0);
+      leftHinge.add(oppositeHinge);
+      oppositeContent.position.set(-oppW, 0, 0);
+    } else {
+      oppositeHinge.position.set(rightW, 0, 0);
+      rightHinge.add(oppositeHinge);
+    }
     oppositeHinge.add(oppositeContent);
 
     // 5. Ceiling (Strop) hinged at top edge (y = H) of Center Wall (directly above the junction box wall)
@@ -919,6 +930,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
       leftHinge,
       rightHinge,
       oppositeHinge,
+      oppositeSign: oppositeSide === 'left' ? 1 : -1,
       ceilingHinge,
       floorMesh,
       ceilingMat: ceilSlabMat,
@@ -935,6 +947,7 @@ export const UnfoldedRoom3D: React.FC<UnfoldedRoom3DProps> = ({
     activeCircuitFilter,
     furniture,
     showFurniture,
+    oppositeSide,
   ]);
 
   return (

@@ -1,7 +1,8 @@
 import React from 'react';
 import { ELEMENT_CATALOG, WALL_META } from '../data/presets';
 import {
-  getOrderedWallsAroundCenter,
+  getStripWallOrder,
+  OppositeSide,
   getPrimaryJunctionBoxWall,
 } from '../engine/electricalEngine';
 import {
@@ -23,6 +24,9 @@ import {
   SurfaceId,
   WallId,
 } from '../types/electrical';
+import { BoardPlan } from '../engine/board';
+import { BoardDiagram, BoardSummary } from './BoardDiagram';
+import { BoardRealistic } from './BoardRealistic';
 import { BomContent } from './BomAndPrintModal';
 
 const PAGE_WIDTH_MM = 272;
@@ -284,8 +288,12 @@ export function PrintSheets({
   segments,
   circuitAnalyses,
   bom,
+  board,
   showFurniture,
+  oppositeSide,
 }: {
+  oppositeSide: OppositeSide;
+  board: BoardPlan;
   showFurniture: boolean;
   projectName: string;
   data: ProjectData;
@@ -295,7 +303,7 @@ export function PrintSheets({
 }) {
   const { room, nodes } = data;
   const center = getPrimaryJunctionBoxWall(nodes);
-  const walls = getOrderedWallsAroundCenter(center);
+  const walls = getStripWallOrder(center, oppositeSide);
   const ceiling = getCeilingViewSize(room, center);
   const date = new Date().toLocaleDateString('hr-HR');
   const usableWidth = PAGE_WIDTH_MM - MARGIN_MM * 2;
@@ -409,6 +417,24 @@ export function PrintSheets({
           </Page>
         );
       })}
+
+      <Page projectName={projectName} title="Razvodni ormar: izgled s prednje strane" date={date}>
+        <div style={{ width: '100%' }}>
+          <BoardRealistic plan={board} printHeightMm={160} />
+        </div>
+      </Page>
+
+      <Page projectName={projectName} title="Razvodni ormar: shema spajanja" date={date}>
+        <div style={{ width: '100%' }}>
+          <BoardDiagram plan={board} printHeightMm={160} />
+        </div>
+      </Page>
+
+      <Page projectName={projectName} title="Razvodni ormar: popis krugova" date={date}>
+        <div style={{ width: '100%' }}>
+          <BoardSummary plan={board} />
+        </div>
+      </Page>
 
       <Page projectName={projectName} title="Strujni krugovi i troškovnik" date={date}>
         <div style={{ width: '100%' }}>

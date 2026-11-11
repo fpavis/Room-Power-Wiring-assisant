@@ -324,8 +324,11 @@ export function computeRoutedSegments(
     return { crossings, overlaps };
   }
 
-  function hitsObstacle(segments2: WallSegment[], c: Connection): boolean {
-    for (const s of segments2) {
+  /** Openings a cable would go through, and other elements it would run across. */
+  function obstaclesHit(pieces: WallSegment[], c: Connection) {
+    let openingsHit = 0;
+    let elementsHit = 0;
+    for (const s of pieces) {
       const wall = wallOrder[s.wall];
       const minX = Math.min(s.a.x, s.b.x);
       const maxX = Math.max(s.a.x, s.b.x);
@@ -338,7 +341,7 @@ export function computeRoutedSegments(
           maxY > op.sillHeight - 0.02 &&
           minY < op.sillHeight + op.height + 0.02
         ) {
-          return true;
+          openingsHit++;
         }
       }
       for (const n of nodes) {
@@ -350,11 +353,11 @@ export function computeRoutedSegments(
           maxY > n.y - size.h - 0.015 &&
           minY < n.y + size.h + 0.015
         ) {
-          return true;
+          elementsHit++;
         }
       }
     }
-    return false;
+    return { openingsHit, elementsHit };
   }
 
   // --- Ceiling cables leave through the middle of the box.
@@ -404,8 +407,22 @@ export function computeRoutedSegments(
 
       group.forEach((c, idx) => {
         const offset = (idx - (group.length - 1) / 2) * PORT_STEP;
-        const riseX = round3(Math.max(0.03, parent.x + offset));
+        let riseX = round3(Math.max(0.03, parent.x + offset));
         const t: Point = c.target;
+        if (parent.surface !== 'ceiling') {
+          // A riser under an opening goes up beside it.
+          const wallId = parent.surface;
+          const blocking = columnOpening(wallId, riseX, parent.y, H);
+          if (blocking) {
+            const sides = [
+              round3(blocking.offsetFromLeft - 0.1 + offset),
+              round3(blocking.offsetFromLeft + blocking.width + 0.1 + offset),
+            ]
+              .filter((x) => x >= 0.03 && x <= widths[wallId] - 0.03)
+              .sort((a, b) => Math.abs(a - riseX) - Math.abs(b - riseX));
+            riseX = sides.find((x) => !columnOpening(wallId, x, parent.y, H)) ?? riseX;
+          }
+        }
 
         if (parent.surface === 'ceiling') {
           add(
@@ -462,6 +479,29 @@ export function computeRoutedSegments(
     }
   }
 
+  const columnOpening = (wall: WallId, x: number, y0: number, y1: number) => {
+    const low = Math.min(y0, y1);
+    const high = Math.max(y0, y1);
+    return openings.find(
+      (op) =>
+        op.wall === wall &&
+        x > op.offsetFromLeft - 0.03 &&
+        x < op.offsetFromLeft + op.width + 0.03 &&
+        high > op.sillHeight - 0.02 &&
+        low < op.sillHeight + op.height + 0.02
+    );
+  };
+
+  const rowBlocked = (wall: WallId, y: number, x0: number, x1: number) =>
+    openings.some(
+      (op) =>
+        op.wall === wall &&
+        y > op.sillHeight - 0.02 &&
+        y < op.sillHeight + op.height + 0.02 &&
+        Math.max(x0, x1) > op.offsetFromLeft - 0.02 &&
+        Math.min(x0, x1) < op.offsetFromLeft + op.width + 0.02
+    );
+
   // --- Horizontal runs in the installation zone.
   const zoneTop = H - 0.15;
   const zoneBottom = H - 0.45;
@@ -473,6 +513,8 @@ export function computeRoutedSegments(
       if (y > H - 0.05) break;
       ys.add(y);
     }
+    // The lower installation zone is the fallback when openings close off the upper one.
+    for (const y of [0.18, 0.24, 0.3, 0.36, 0.42]) ys.add(y);
     if (run.c.target.category === 'junction_box') ys.add(round3(run.c.target.y));
     if (run.c.parent.surface !== 'ceiling') ys.add(round3(run.c.parent.y));
     return [...ys].sort((a, b) => a - b);
@@ -517,47 +559,68 @@ export function computeRoutedSegments(
     return H - 0.3;
   };
 
-  /** Moves a vertical drop clear of an opening on the target wall. */
+  /** Picks the nearest column from which the target is reachable without crossing an opening. */
   function dropLocalX(run: Run, trackY: number, dropOffset: number): number {
     const target = run.c.target;
-    let dropX = round3(target.x + dropOffset);
-    const low = Math.min(trackY, target.y);
-    const high = Math.max(trackY, target.y);
-    for (const op of openings.filter((o) => o.wall === run.c.endWall)) {
-      if (
-        dropX > op.offsetFromLeft - 0.04 &&
-        dropX < op.offsetFromLeft + op.width + 0.04 &&
-        high > op.sillHeight &&
-        low < op.sillHeight + op.height
-      ) {
-        dropX =
-          target.x < op.offsetFromLeft + op.width / 2
-            ? Math.max(0.08, round3(op.offsetFromLeft - 0.12))
-            : round3(op.offsetFromLeft + op.width + 0.12);
-      }
-    }
-    return dropX;
+    const wall = run.c.endWall;
+    const width = widths[wall];
+    const preferred = round3(target.x + dropOffset);
+    const candidates = [
+      preferred,
+      ...openings
+        .filter((op) => op.wall === wall)
+        .flatMap((op) => [
+          round3(op.offsetFromLeft - 0.12),
+          round3(op.offsetFromLeft + op.width + 0.12),
+        ]),
+    ]
+      .filter((x) => x >= 0.03 && x <= width - 0.03)
+      .sort((a, b) => Math.abs(a - preferred) - Math.abs(b - preferred));
+    return (
+      candidates.find(
+        (x) =>
+          !columnOpening(wall, x, trackY, target.y) && !rowBlocked(wall, target.y, x, target.x)
+      ) ?? preferred
+    );
   }
 
   function buildPolyline(run: Run, trackY: number, portX: number, dropOffset: number): Point[] {
     const { c, dir, startStripX, endStripX } = run;
     const size = halfSize(c.parent);
     const points: Point[] = [{ x: startStripX, y: c.startY }];
-    const portStrip = startStripX + portX;
     if (c.parent.surface === 'ceiling') {
       points.push({ x: startStripX, y: trackY });
     } else if (Math.abs(trackY - c.startY) <= size.h + EPS) {
       points.push({ x: startStripX, y: trackY });
     } else {
-      points.push({ x: portStrip, y: c.startY }, { x: portStrip, y: trackY });
+      // A riser that would run through an opening goes up beside it instead.
+      let riser = c.startX + portX;
+      const blocking = columnOpening(c.startWall, riser, c.startY, trackY);
+      if (blocking) {
+        const sides = [blocking.offsetFromLeft - 0.1, blocking.offsetFromLeft + blocking.width + 0.1]
+          .filter((x) => x >= 0.03 && x <= widths[c.startWall] - 0.03)
+          .sort((a, b) => Math.abs(a - riser) - Math.abs(b - riser));
+        riser = sides.find((x) => !columnOpening(c.startWall, x, c.startY, trackY)) ?? riser;
+      }
+      const riserStrip = startStripX + (riser - c.startX);
+      points.push({ x: riserStrip, y: c.startY }, { x: riserStrip, y: trackY });
     }
 
     const target = c.target;
     const targetSize = halfSize(target);
     if (target.category === 'junction_box' || target.category === 'distribution_board') {
       if (Math.abs(trackY - target.y) > EPS) {
-        const approach = endStripX - dir * (targetSize.w + ENTRY_RUN);
-        points.push({ x: approach, y: trackY }, { x: approach, y: target.y });
+        // Enter from the side, or straight from above when an opening stands beside the box.
+        const offset = targetSize.w + ENTRY_RUN;
+        const entries = [-dir * offset, 0, dir * offset];
+        const entry =
+          entries.find(
+            (e) =>
+              target.x + e >= 0.03 &&
+              target.x + e <= widths[c.endWall] - 0.03 &&
+              !columnOpening(c.endWall, target.x + e, trackY, target.y)
+          ) ?? entries[0];
+        points.push({ x: endStripX + entry, y: trackY }, { x: endStripX + entry, y: target.y });
       }
       points.push({ x: endStripX, y: target.y });
     } else {
@@ -649,11 +712,12 @@ export function computeRoutedSegments(
       for (const y of candidateYs(run)) {
         const poly = buildPolyline(run, y, port, dropOffsetOf(run));
         const pieces = asWallSegments(poly, run.c);
-        const blocked = hitsObstacle(pieces, run.c);
+        const { openingsHit, elementsHit } = obstaclesHit(pieces, run.c);
         const { crossings, overlaps } = conflicts(pieces, run.c);
         const outsideZone = y > zoneTop + EPS || y < zoneBottom - EPS;
         const score =
-          (blocked ? 1e7 : 0) +
+          openingsHit * 1e8 +
+          elementsHit * 1e6 +
           crossings * 1e4 +
           overlaps * 5e3 +
           (outsideZone ? 40 : 0) +
@@ -725,7 +789,9 @@ export function computeRoutedSegments(
   routeCeilingConnections(connections.filter((c) => c.target.surface === 'ceiling'));
   const wallConnections = connections.filter((c) => c.target.surface !== 'ceiling');
   const isDirect = (c: Connection) =>
-    c.startWall === c.endWall && Math.abs(c.target.x - c.startX) <= 0.06;
+    c.startWall === c.endWall &&
+    Math.abs(c.target.x - c.startX) <= 0.06 &&
+    !columnOpening(c.endWall, c.startX, c.startY, c.target.y);
   routeDirectDrops(wallConnections.filter(isDirect));
   routeWallRuns(wallConnections.filter((c) => !isDirect(c)));
 

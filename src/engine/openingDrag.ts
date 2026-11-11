@@ -34,9 +34,9 @@ const MIN_GAP = 0.05;
 
 const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 
-function firstWithin(raw: number, options: OpeningLock[]): OpeningLock | null {
+function firstWithin(raw: number, options: OpeningLock[], reach: number): OpeningLock | null {
   let best: OpeningLock | null = null;
-  let bestDistance = SNAP_DISTANCE;
+  let bestDistance = reach;
   for (const option of options) {
     const distance = Math.abs(option.value - raw);
     if (distance <= bestDistance) {
@@ -60,7 +60,8 @@ export function computeOpeningDrag(
   room: RoomDimensions,
   openings: WallOpening[],
   nodes: ElectricalNode[],
-  furniture: FurnitureItem[] = []
+  furniture: FurnitureItem[] = [],
+  snapDistance = SNAP_DISTANCE
 ): OpeningDragResult {
   const wallWidth = getSurfaceSize(wall, room).width;
   const others = openings.filter((o) => o.id !== opening.id);
@@ -116,7 +117,7 @@ export function computeOpeningDrag(
       });
     }
   }
-  const xLock = firstWithin(offset, xOptions);
+  const xLock = firstWithin(offset, xOptions, snapDistance);
   if (xLock) {
     offset = xLock.value;
     locks.push(xLock);
@@ -143,7 +144,7 @@ export function computeOpeningDrag(
         yOptions.push({ axis: 'y', value, guide: head, label: 'Poravnato s vratima' });
       }
     }
-    const yLock = firstWithin(sill, yOptions);
+    const yLock = firstWithin(sill, yOptions, snapDistance);
     if (yLock) {
       sill = yLock.value;
       locks.push(yLock);

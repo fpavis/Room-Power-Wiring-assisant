@@ -498,7 +498,7 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
   let feeder = board ?? nodes.find((n) => n.category === 'junction_box');
 
   const shortLabel = (n: ElectricalNode) => n.label.split(' ')[0];
-  const wallName = (surface: WallId) => WALL_META[surface].short;
+  const wallName = (surface: WallId) => WALL_META[surface].short.replace('Zid ', '');
   const nextSocketLabel = (name: string) =>
     `U-${nextNumber(
       nodes.map((n) => n.label),
@@ -515,14 +515,14 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
   const loadPercent = (c: ElectricalCircuit) =>
     ((appliancesOn(c.id).reduce((sum, a) => sum + a.powerWatts, 0) + lightsWatts(c.id)) / capacity(c)) * 100;
 
-  function makeCircuit(app: ApplianceItem): ElectricalCircuit {
+  function makeCircuit(app: ApplianceItem, threePhaseSocket = false): ElectricalCircuit {
     const circuit: ElectricalCircuit = {
       id: newId('cir'),
       code: nextCircuitCode(circuits),
       name: `Zasebni: ${app.name.slice(0, 24)}`,
       breakerAmps: 16,
       breakerCurve: 'B',
-      phaseType: app.threePhase ? '3P' : '1P',
+      phaseType: app.threePhase || threePhaseSocket ? '3P' : '1P',
       cableCrossSection: 2.5,
       color: unusedColor(circuits),
       mainJunctionBoxId: feeder?.id ?? '',
@@ -538,9 +538,16 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
       socket && appliances.some((a) => a !== app && a.assignedNodeId === socket.id);
 
     if (socket && !sharesSocket) {
-      const circuit = makeCircuit(app);
+      const circuit = makeCircuit(app, socket.category === 'socket_shuko_3p');
       nodes = nodes.map((n) =>
-        n.id === socket.id ? { ...n, circuitId: circuit.id, parentBoxId: feeder?.id } : n
+        n.id === socket.id
+          ? {
+              ...n,
+              circuitId: circuit.id,
+              parentBoxId: feeder?.id,
+              category: app.threePhase ? ('socket_shuko_3p' as const) : n.category,
+            }
+          : n
       );
       app.circuitId = circuit.id;
       changes.push(
@@ -575,6 +582,31 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
     return true;
   }
 
+  // Added outlets go on a general socket circuit, never on one reserved for a single load.
+  const generalSocketCircuit = (): ElectricalCircuit => {
+    const existing = circuits.find(
+      (c) =>
+        c.phaseType === '1P' &&
+        c.breakerAmps === 16 &&
+        !c.name.startsWith('Zasebni') &&
+        !nodes.some((n) => n.circuitId === c.id && n.category.startsWith('light_'))
+    );
+    if (existing) return existing;
+    const created: ElectricalCircuit = {
+      id: newId('cir'),
+      code: nextCircuitCode(circuits),
+      name: 'Utičnice',
+      breakerAmps: 16,
+      breakerCurve: 'B',
+      phaseType: '1P',
+      cableCrossSection: 2.5,
+      color: unusedColor(circuits),
+      mainJunctionBoxId: feeder?.id ?? '',
+    };
+    circuits.push(created);
+    return created;
+  };
+
   // Elements left outside their surface go back onto it
   for (const node of getOutsideNodes({ ...data, nodes })) {
     const moved = moveNodeInside({ ...data, nodes }, node.id);
@@ -582,8 +614,8 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
     changes.push(`${shortLabel(node)}: premješta se natrag unutar plohe.`);
   }
 
-  // Every installation needs a board to start from
-  if (nodes.length > 0 && !board) {
+  // Every installation needs a board to start from, including one this pass is about to create
+  if ((nodes.length > 0 || appliances.length > 0) && !board) {
     const spot = findFreeWallSpot(1.65, data, nodes);
     if (spot && circuits[0]) {
       const created = addNode(
@@ -602,6 +634,79 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
       unresolved.push('Nema slobodnog mjesta za razvodni ormar.');
     }
   }
+
+  // Single-phase equipment does not belong on a three-phase circuit, or the reverse
+  const needsThreePhase = (n: ElectricalNode) => n.category === 'socket_shuko_3p';
+  const isSinglePhaseOnly = (n: ElectricalNode) =>
+    n.category === 'socket_single' ||
+    n.category === 'socket_double' ||
+    n.category === 'socket_fixed_1p' ||
+    n.category.startsWith('switch_') ||
+    n.category.startsWith('light_');
+  const isLight = (n: ElectricalNode) =>
+    n.category.startsWith('switch_') || n.category.startsWith('light_');
+  for (const node of nodes.filter(isSinglePhaseOnly)) {
+    const own = circuits.find((c) => c.id === node.circuitId);
+    if (own?.phaseType !== '3P') continue;
+    const wantsLighting = isLight(node);
+    let target = circuits.find(
+      (c) => c.phaseType === '1P' && (wantsLighting ? c.breakerAmps === 10 : c.breakerAmps === 16)
+    );
+    if (!target) {
+      target = {
+        id: newId('cir'),
+        code: nextCircuitCode(circuits),
+        name: wantsLighting ? 'Rasvjeta' : 'Utičnice',
+        breakerAmps: wantsLighting ? 10 : 16,
+        breakerCurve: 'B',
+        phaseType: '1P',
+        cableCrossSection: wantsLighting ? 1.5 : 2.5,
+        color: unusedColor(circuits),
+        mainJunctionBoxId: feeder?.id ?? '',
+      };
+      circuits.push(target);
+    }
+    const targetId = target.id;
+    nodes = nodes.map((n) =>
+      n.id === node.id ? { ...n, circuitId: targetId, parentBoxId: feeder?.id } : n
+    );
+    changes.push(`${shortLabel(node)}: prelazi s trofaznog kruga ${own.code} na jednofazni ${target.code}.`);
+  }
+  for (const node of nodes.filter(needsThreePhase)) {
+    const own = circuits.find((c) => c.id === node.circuitId);
+    if (!own || own.phaseType === '3P') continue;
+    const others = nodes.filter((n) => n.circuitId === own.id && n.id !== node.id);
+    if (others.length === 0) {
+      circuits = circuits.map((c) => (c.id === own.id ? { ...c, phaseType: '3P' as const } : c));
+      changes.push(`${own.code}: postaje trofazni krug zbog priključka ${shortLabel(node)}.`);
+      continue;
+    }
+    const created: ElectricalCircuit = {
+      id: newId('cir'),
+      code: nextCircuitCode(circuits),
+      name: `Trofazni: ${shortLabel(node)}`,
+      breakerAmps: 16,
+      breakerCurve: 'B',
+      phaseType: '3P',
+      cableCrossSection: 2.5,
+      color: unusedColor(circuits),
+      mainJunctionBoxId: feeder?.id ?? '',
+    };
+    circuits.push(created);
+    nodes = nodes.map((n) =>
+      n.id === node.id ? { ...n, circuitId: created.id, parentBoxId: feeder?.id } : n
+    );
+    changes.push(`Novi trofazni krug ${created.code} za priključak ${shortLabel(node)}.`);
+  }
+
+  // A device fed through a junction box must be on that box's circuit
+  nodes = nodes.map((n) => {
+    if (n.category === 'junction_box' || n.category === 'distribution_board') return n;
+    const box = nodes.find((p) => p.id === n.parentBoxId);
+    if (box?.category !== 'junction_box' || box.circuitId === n.circuitId) return n;
+    changes.push(`${shortLabel(n)}: napajanje se ispravlja jer je kutija ${shortLabel(box)} na drugom krugu.`);
+    return { ...n, parentBoxId: feeder?.id };
+  });
 
   // A Schuko socket is rated 16 A, so its circuit may not be fused higher
   circuits = circuits.map((c) => {
@@ -623,21 +728,81 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
         unresolved.push(`Nema slobodnog mjesta za utičnicu: ${app.name}.`);
         continue;
       }
+      // A socket on a three-phase or 20 A circuit cannot simply gain a Schuko neighbour.
+      const source = circuits.find((c) => c.id === socket.circuitId);
+      const staysOnCircuit = app.threePhase || (source?.phaseType === '1P' && source.breakerAmps <= 16);
       const added: ElectricalNode = {
         id: newId('node'),
         surface: spot.surface,
-        category: 'socket_single',
+        category: app.threePhase ? 'socket_shuko_3p' : 'socket_single',
         label: nextSocketLabel(app.name),
         x: spot.x,
         y: 0.3,
-        circuitId: socket.circuitId,
-        parentBoxId: socket.parentBoxId,
+        circuitId: staysOnCircuit ? socket.circuitId : generalSocketCircuit().id,
+        parentBoxId: staysOnCircuit ? socket.parentBoxId : feeder?.id,
       };
       nodes.push(added);
       app.assignedNodeId = added.id;
       changes.push(
         `Utičnica ${shortLabel(socket)} ima premalo mjesta. Nova utičnica ${shortLabel(added)} na zidu ${wallName(spot.surface)} za: ${app.name}.`
       );
+    }
+  }
+
+  // Lighting away from socket circuits
+  for (const circuit of [...circuits]) {
+    if (!hasLightsAndSockets(circuit.id, nodes)) continue;
+    const isLightingOnly = (c: ElectricalCircuit) => {
+      const members = nodes.filter((n) => n.circuitId === c.id);
+      return (
+        members.length > 0 &&
+        members.every(
+          (n) =>
+            n.category.startsWith('light_') ||
+            n.category.startsWith('switch_') ||
+            n.category === 'junction_box'
+        )
+      );
+    };
+    let target = circuits.find(
+      (c) => c.phaseType === '1P' && c.breakerAmps === 10 && isLightingOnly(c)
+    );
+    if (!target) {
+      target = {
+        id: newId('cir'),
+        code: nextCircuitCode(circuits),
+        name: 'Rasvjeta',
+        breakerAmps: 10,
+        breakerCurve: 'B',
+        phaseType: '1P',
+        cableCrossSection: 1.5,
+        color: unusedColor(circuits),
+        mainJunctionBoxId: feeder?.id ?? '',
+      };
+      circuits.push(target);
+    }
+    const lightingId = target.id;
+    const moved = nodes.filter(
+      (n) =>
+        n.circuitId === circuit.id &&
+        (n.category.startsWith('light_') || n.category.startsWith('switch_'))
+    );
+    nodes = nodes.map((n) =>
+      moved.some((m) => m.id === n.id)
+        ? { ...n, circuitId: lightingId, parentBoxId: feeder?.id }
+        : n
+    );
+    changes.push(
+      `${circuit.code}: rasvjeta i prekidači (${moved.map(shortLabel).join(', ')}) prelaze na krug ${target.code}.`
+    );
+  }
+
+  // Three-phase appliances need a three-phase socket on a three-phase circuit
+  for (const app of appliances.filter((a) => a.threePhase && a.assignedNodeId)) {
+    const socket = nodes.find((n) => n.id === app.assignedNodeId);
+    const circuit = circuits.find((c) => c.id === socket?.circuitId);
+    if (socket && (socket.category !== 'socket_shuko_3p' || circuit?.phaseType !== '3P')) {
+      giveOwnCircuit(app);
     }
   }
 
@@ -653,7 +818,12 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
     while (loadPercent(circuit) >= HIGH_LOAD_PERCENT) {
       const onCircuit = appliancesOn(circuit.id).sort((a, b) => b.powerWatts - a.powerWatts);
       if (onCircuit.length === 0) break;
-      if (onCircuit.length === 1 && lightsWatts(circuit.id) === 0) break;
+      if (onCircuit.length === 1 && lightsWatts(circuit.id) === 0) {
+        const others = nodes.some(
+          (n) => n.circuitId === circuit.id && n.id !== onCircuit[0].assignedNodeId && n.category.startsWith('socket_')
+        );
+        if (!others || !onCircuit[0].assignedNodeId) break;
+      }
       if (!giveOwnCircuit(onCircuit[0])) break;
     }
   }
@@ -709,6 +879,7 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
       break;
     }
     const isDouble = deficit >= 2;
+    const outletCircuit = generalSocketCircuit();
     const added: ElectricalNode = {
       id: newId('node'),
       surface: spot.surface,
@@ -716,66 +887,20 @@ export function autoAdaptNetwork(data: ProjectData): NetworkAdaptation {
       label: nextSocketLabel('Dodana utičnica'),
       x: spot.x,
       y: 0.3,
-      circuitId: circuits[0].id,
+      circuitId: outletCircuit.id,
       parentBoxId:
         nodes.find(
           (n) =>
             n.category === 'junction_box' &&
             n.surface === spot.surface &&
-            n.circuitId === circuits[0].id
+            n.circuitId === outletCircuit.id
         )?.id ?? feeder?.id,
     };
     nodes.push(added);
     changes.push(
-      `Nova ${isDouble ? 'dvostruka' : 'jednostruka'} utičnica ${shortLabel(added)} na zidu ${wallName(spot.surface)}, ${formatMeters(spot.x)} m od kuta, na krugu ${circuits[0].code}.`
+      `Nova ${isDouble ? 'dvostruka' : 'jednostruka'} utičnica ${shortLabel(added)} na zidu ${wallName(spot.surface)}, ${formatMeters(spot.x)} m od kuta, na krugu ${outletCircuit.code}.`
     );
     deficit -= isDouble ? 2 : 1;
-  }
-
-  // 5. Lighting away from socket circuits
-  for (const circuit of [...circuits]) {
-    if (!hasLightsAndSockets(circuit.id, nodes)) continue;
-    const isLightingOnly = (c: ElectricalCircuit) => {
-      const members = nodes.filter((n) => n.circuitId === c.id);
-      return (
-        members.length > 0 &&
-        members.every(
-          (n) =>
-            n.category.startsWith('light_') ||
-            n.category.startsWith('switch_') ||
-            n.category === 'junction_box'
-        )
-      );
-    };
-    let target = circuits.find((c) => c.breakerAmps === 10 && isLightingOnly(c));
-    if (!target) {
-      target = {
-        id: newId('cir'),
-        code: nextCircuitCode(circuits),
-        name: 'Rasvjeta',
-        breakerAmps: 10,
-        breakerCurve: 'B',
-        phaseType: '1P',
-        cableCrossSection: 1.5,
-        color: unusedColor(circuits),
-        mainJunctionBoxId: feeder?.id ?? '',
-      };
-      circuits.push(target);
-    }
-    const lightingId = target.id;
-    const moved = nodes.filter(
-      (n) =>
-        n.circuitId === circuit.id &&
-        (n.category.startsWith('light_') || n.category.startsWith('switch_'))
-    );
-    nodes = nodes.map((n) =>
-      moved.some((m) => m.id === n.id)
-        ? { ...n, circuitId: lightingId, parentBoxId: feeder?.id }
-        : n
-    );
-    changes.push(
-      `${circuit.code}: rasvjeta i prekidači (${moved.map(shortLabel).join(', ')}) prelaze na krug ${target.code}.`
-    );
   }
 
   // 6. Junction boxes into the upper zone

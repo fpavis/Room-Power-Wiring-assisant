@@ -11,12 +11,18 @@ import {
   Pencil,
   Printer,
   Redo2,
+  Server,
   Undo2,
   Wand2,
   Zap,
 } from 'lucide-react';
 import { ELEMENT_CATALOG, WALL_META } from '../data/presets';
-import { analyzeProject, getPrimaryJunctionBoxWall } from '../engine/electricalEngine';
+import {
+  analyzeProject,
+  getOrderedWallsAroundCenter,
+  getPrimaryJunctionBoxWall,
+  OppositeSide,
+} from '../engine/electricalEngine';
 import { formatNumber } from '../engine/geometry';
 import {
   addNode,
@@ -43,6 +49,8 @@ import { FILE_EXTENSION, serializeProject } from '../persistence/projectFile';
 import { commit, createHistory, History, redo, undo } from '../state/history';
 import { ApplianceItem, ElementCategory, ProjectData, SurfaceId, WallId } from '../types/electrical';
 import { BomContent } from './BomAndPrintModal';
+import { BoardDiagram, BoardSummary } from './BoardDiagram';
+import { BoardRealistic } from './BoardRealistic';
 import { Blueprint2DCanvas, CanvasHandle, CanvasLayers } from './Blueprint2DCanvas';
 import { Inspector } from './Inspector';
 import { LoadsPanel, socketSlots } from './LoadsPanel';
@@ -53,7 +61,7 @@ import { UnfoldedRoom3D } from './UnfoldedRoom3D';
 import { WiringSchematicModal } from './WiringSchematicModal';
 
 type Step = 'prostorija' | 'elementi' | 'trosila' | 'provjera';
-type ViewMode = '2d_strip' | '2d_single' | '3d';
+type ViewMode = '2d_strip' | '2d_single' | '3d' | 'ormar';
 type SaveStatus = 'saved' | 'saving' | 'error';
 
 const STEPS: { id: Step; label: string }[] = [
@@ -63,6 +71,7 @@ const STEPS: { id: Step; label: string }[] = [
   { id: 'provjera', label: 'Provjera i ispis' },
 ];
 
+const OPPOSITE_SIDE_KEY = 'elektroplan:opposite-side';
 const STORAGE_NOTICE_KEY = 'elektroplan:storage-notice-hidden';
 
 const PALETTE_GROUPS: { id: string; title: string; categories: ElementCategory[] }[] = [
@@ -117,6 +126,21 @@ export function Editor({
   const [sheetOpen, setSheetOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(compact ? '2d_single' : '2d_strip');
   const [unfold, setUnfold] = useState(0.5);
+  const [oppositeSide, setOppositeSide] = useState<OppositeSide>(() => {
+    try {
+      return localStorage.getItem(OPPOSITE_SIDE_KEY) === 'left' ? 'left' : 'right';
+    } catch {
+      return 'right';
+    }
+  });
+  const chooseOppositeSide = (side: OppositeSide) => {
+    setOppositeSide(side);
+    try {
+      localStorage.setItem(OPPOSITE_SIDE_KEY, side);
+    } catch {
+      // The choice still holds for this session.
+    }
+  };
   const [activeSurface, setActiveSurface] = useState<SurfaceId>(() =>
     getPrimaryJunctionBoxWall(project.data.nodes)
   );
@@ -137,6 +161,7 @@ export function Editor({
   const [showWiring, setShowWiring] = useState(false);
   const [showBom, setShowBom] = useState(false);
   const [printHint, setPrintHint] = useState(false);
+  const [showBoard, setShowBoard] = useState(false);
   const [printMounted, setPrintMounted] = useState(false);
   const [printRequested, setPrintRequested] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -221,7 +246,7 @@ export function Editor({
     () => computeRoutedSegments(room, nodes, circuits, openings),
     [room, nodes, circuits, openings]
   );
-  const { socketBalance, circuitAnalyses, bom } = useMemo(
+  const { socketBalance, circuitAnalyses, bom, board } = useMemo(
     () => analyzeProject(nodes, appliances, circuits, segments),
     [nodes, appliances, circuits, segments]
   );
@@ -502,6 +527,18 @@ export function Editor({
           <b>{bom.totalPurchaseCableMeters} m</b>
         </div>
       </CollapsibleSection>
+      <CollapsibleSection
+        id="provjera-ormar"
+        title="Razvodni ormar"
+        summary={`${board.groups.length} FID · ${circuits.length} osig.`}
+      >
+        <p className="text-[12px] text-muted">
+          Glavna sklopka, FID sklopke, osigurači i spajanje svih vodova.
+        </p>
+        <button className="btn w-full" onClick={() => setShowBoard(true)}>
+          <Server className="w-4 h-4" /> Prikaži razvodni ormar
+        </button>
+      </CollapsibleSection>
       <CollapsibleSection id="provjera-dokumenti" title="Sheme i ispis">
         <button className="btn w-full" onClick={() => setShowWiring(true)}>
           <Zap className="w-4 h-4" /> Sheme spajanja
@@ -545,6 +582,7 @@ export function Editor({
       onClose={() => setSelectedNodeId(null)}
       onSelect={setSelectedNodeId}
       onShowWiring={() => setShowWiring(true)}
+      onShowBoard={() => setShowBoard(true)}
     />
   );
 
@@ -721,7 +759,33 @@ export function Editor({
                 {viewButton('2d_strip', 'Svi zidovi')}
                 {viewButton('2d_single', 'Jedan zid')}
                 {viewButton('3d', '3D')}
+                {viewButton('ormar', 'Ormar')}
               </div>
+              {(viewMode === '2d_strip' || viewMode === '3d') && (() => {
+                const opposite = getOrderedWallsAroundCenter(
+                  getPrimaryJunctionBoxWall(nodes, selectedNodeId)
+                )[3];
+                return (
+                  <div className="flex items-center gap-1 text-[12px]" role="group" aria-label="Položaj nasuprotnog zida">
+                    <span>{WALL_META[opposite].name}:</span>
+                    <div className="flex gap-0.5 p-0.5 bg-panel border border-line rounded">
+                      {(['left', 'right'] as OppositeSide[]).map((side) => (
+                        <button
+                          key={side}
+                          aria-pressed={oppositeSide === side}
+                          data-testid={`nasuprotni-${side}`}
+                          className={`px-2 py-0.5 rounded-sm font-semibold ${
+                            oppositeSide === side ? 'bg-ink text-paper' : 'text-muted hover:text-ink'
+                          }`}
+                          onClick={() => chooseOppositeSide(side)}
+                        >
+                          {side === 'left' ? 'skroz lijevo' : 'skroz desno'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
               {viewMode === '2d_single' && (
                 <div className="flex gap-0.5">
                   {(['north', 'east', 'south', 'west', 'ceiling'] as SurfaceId[]).map((s) => (
@@ -782,8 +846,18 @@ export function Editor({
             </div>
 
             <div className="flex-1 min-h-0 relative">
-              {viewMode === '3d' ? (
+              {viewMode === 'ormar' ? (
+                <div className="absolute inset-0 p-3 flex flex-col gap-2">
+                  <p className="text-[12.5px] text-muted text-center shrink-0">
+                    Otvoreni ormar s prednje strane. Širina modula je stvarna, a razmaci među vodovima povećani su radi preglednosti.
+                  </p>
+                  <div className="flex-1 min-h-0">
+                    <BoardRealistic plan={board} fitHeight />
+                  </div>
+                </div>
+              ) : viewMode === '3d' ? (
                 <UnfoldedRoom3D
+                  oppositeSide={oppositeSide}
                   room={room}
                   openings={openings}
                   nodes={nodes}
@@ -801,6 +875,7 @@ export function Editor({
                 />
               ) : (
                 <Blueprint2DCanvas
+                  oppositeSide={oppositeSide}
                   ref={canvasRef}
                   room={room}
                   openings={openings}
@@ -976,6 +1051,19 @@ export function Editor({
         </Dialog>
       )}
 
+      {showBoard && (
+        <Dialog title="Razvodni ormar" wide onClose={() => setShowBoard(false)}>
+          <div className="space-y-4">
+            <BoardRealistic plan={board} />
+            <h3 className="section-title">Shema spajanja</h3>
+            <div className="overflow-x-auto">
+              <BoardDiagram plan={board} />
+            </div>
+            <BoardSummary plan={board} />
+          </div>
+        </Dialog>
+      )}
+
       {printHint && (
         <Dialog title="Ispis na A4" onClose={() => setPrintHint(false)}>
           <div className="space-y-3">
@@ -1002,11 +1090,13 @@ export function Editor({
 
       {printMounted && (
         <PrintSheets
+          oppositeSide={oppositeSide}
           projectName={name}
           data={data}
           segments={segments}
           circuitAnalyses={circuitAnalyses}
           bom={bom}
+          board={board}
           showFurniture={layers.furniture}
         />
       )}

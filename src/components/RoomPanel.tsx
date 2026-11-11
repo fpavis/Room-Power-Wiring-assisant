@@ -84,7 +84,7 @@ function AddOpeningMenu({
     offsetFromLeft: 0.5,
     ...OPENING_DEFAULTS.window,
   });
-  const errors = validateOpening(draft, data.room, data.furniture);
+  const errors = validateOpening(draft, data.room, data.furniture, data.nodes);
 
   if (!open) {
     return (
@@ -261,7 +261,7 @@ export function RoomPanel({
           </p>
         )}
         {openings.map((op) => {
-          const errors = validateOpening(op, room, furniture);
+          const errors = validateOpening(op, room, furniture, data.nodes);
           const invalid = Object.keys(errors).length > 0;
           const isEditing = editingId === op.id;
           return (

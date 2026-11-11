@@ -148,6 +148,34 @@ export function checkInstallationRules(
       });
     }
 
+    const members3 = nodes.filter((n) => n.circuitId === circuit.id);
+    if (circuit.phaseType === '3P' && members3.some((n) => n.category !== 'socket_shuko_3p' && n.category !== 'junction_box' && n.category !== 'distribution_board')) {
+      hints.push({
+        id: `phase-${circuit.id}`,
+        level: 'warning',
+        text: `${circuit.code}: jednofazni elementi na trofaznom krugu. Rješenje: prebaciti ih na jednofazni krug.`,
+      });
+    }
+    if (circuit.phaseType === '1P' && members3.some((n) => n.category === 'socket_shuko_3p')) {
+      hints.push({
+        id: `phase3-${circuit.id}`,
+        level: 'warning',
+        text: `${circuit.code}: trofazni priključak na jednofaznom krugu. Rješenje: zaseban trofazni krug.`,
+      });
+    }
+    const wrongBox = members3.find((n) => {
+      if (n.category === 'junction_box') return false;
+      const box = nodes.find((p) => p.id === n.parentBoxId);
+      return box?.category === 'junction_box' && box.circuitId !== n.circuitId;
+    });
+    if (wrongBox) {
+      hints.push({
+        id: `box-circuit-${wrongBox.id}`,
+        level: 'warning',
+        text: `${wrongBox.label.split(' ')[0]}: napaja se iz razvodne kutije drugog kruga. Rješenje: napajanje iz ormara ili kutije istog kruga.`,
+      });
+    }
+
     if (circuit.breakerAmps > 16 && hasSchukoSockets(circuit.id, nodes)) {
       hints.push({
         id: `schuko-${circuit.id}`,

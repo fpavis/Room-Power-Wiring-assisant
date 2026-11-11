@@ -6,8 +6,16 @@ import {
   INITIAL_OPENINGS,
   INITIAL_ROOM,
 } from '../data/presets';
-import { ElectricalNode, FurnitureItem, ProjectData, WallId } from '../types/electrical';
-import { analyzeProject, cablePurchaseMeters, getCableAndConduitSpec } from './electricalEngine';
+import { ElectricalCircuit, ElectricalNode, FurnitureItem, ProjectData, WallId } from '../types/electrical';
+import { planDistributionBoard } from './board';
+import { layoutBoardRails } from './boardLayout';
+import {
+  analyzeProject,
+  cablePurchaseMeters,
+  computeSnapAndDimensions,
+  getCableAndConduitSpec,
+  getStripWallOrder,
+} from './electricalEngine';
 import {
   addFurniture,
   computeFurnitureDrag,
@@ -559,6 +567,53 @@ describe('pravila struke', () => {
   });
 });
 
+describe('snap elemenata', () => {
+  const room2 = { length: 4, width: 3, height: 2.6 };
+  const node = (id: string, x: number, y: number): ElectricalNode => ({
+    id, surface: 'north', category: 'socket_single', label: id, x, y, circuitId: 'c',
+  });
+  const snap = (x: number, y: number, nodes: ElectricalNode[], tolerance?: number, sticky?: { x?: number; y?: number }) =>
+    computeSnapAndDimensions('north', x, y, room2, nodes, [], undefined, true, tolerance, sticky);
+
+  it('bira najbliži element, a ne prvi u popisu', () => {
+    const r = snap(1.06, 1.5, [node('a', 1.0, 0.3), node('b', 1.08, 0.3)]);
+    expect(r.x).toBe(1.08);
+    expect(r.snappedXNodeId).toBe('b');
+  });
+  it('doseg prati zadanu toleranciju', () => {
+    const nodes = [node('a', 1.0, 0.3)];
+    expect(snap(1.15, 1.5, nodes, 0.08).x).toBe(1.15);
+    expect(snap(1.15, 1.5, nodes, 0.2).x).toBe(1.0);
+  });
+  it('element pobjeđuje standardnu visinu na istoj udaljenosti', () => {
+    const r = snap(2, 0.325, [node('a', 1.0, 0.35)]);
+    expect(r.y).toBe(0.35);
+    expect(r.snappedYNodeId).toBe('a');
+  });
+  it('hvata sredinu zida i 15 cm uz otvor', () => {
+    expect(snap(2.04, 1.5, []).x).toBe(2);
+    const door = { id: 'd', wall: 'north' as const, type: 'door' as const, label: 'Vrata', offsetFromLeft: 1, width: 0.9, height: 2.05, sillHeight: 0 };
+    const r = computeSnapAndDimensions('north', 2.08, 1.05, room2, [], [door]);
+    expect(r.x).toBeCloseTo(2.05, 6);
+    expect(r.collidingOpening).toBeNull();
+  });
+  it('drži vodilicu malo dulje kad je već uhvaćena', () => {
+    const nodes = [node('a', 1.0, 0.3)];
+    expect(snap(1.11, 1.5, nodes, 0.08).x).toBe(1.11);
+    expect(snap(1.11, 1.5, nodes, 0.08, { x: 1.0 }).x).toBe(1.0);
+    expect(snap(1.2, 1.5, nodes, 0.08, { x: 1.0 }).x).toBe(1.2);
+  });
+  it('bez snapa vraća položaj na centimetar i unutar plohe', () => {
+    const r = computeSnapAndDimensions('north', 9, -1, room2, [node('a', 1, 0.3)], [], undefined, false);
+    expect(r.x).toBeCloseTo(3.9, 6);
+    expect(r.y).toBeCloseTo(0.1, 6);
+  });
+  it('nasuprotni zid može na oba kraja niza, a redoslijed ostaje kružan', () => {
+    expect(getStripWallOrder('west', 'right')).toEqual(['south', 'west', 'north', 'east']);
+    expect(getStripWallOrder('west', 'left')).toEqual(['east', 'south', 'west', 'north']);
+  });
+});
+
 describe('validacija', () => {
   it('prostorija izvan raspona vraća poruku', () => {
     expect(validateRoomField('length', 0.5)).toContain('od 1,00 do 30,00');
@@ -867,8 +922,9 @@ describe('automatska prilagodba: potpuna logika', () => {
     let data: ProjectData = { ...empty, furniture: [wide('n', 'north', 4)] };
     data = addApplianceFromTemplate(data, template('Usisavač ili pomoćno trošilo'));
     const result = autoAdaptNetwork(data);
-    expect(result.data.nodes).toHaveLength(1);
-    expect(result.data.nodes[0].surface).not.toBe('north');
+    const sockets = result.data.nodes.filter((n) => n.category.startsWith('socket_'));
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0].surface).not.toBe('north');
   });
 
   it('ne mijenja ulazne podatke ni kad razdvaja krugove', () => {
@@ -883,6 +939,177 @@ describe('automatska prilagodba: potpuna logika', () => {
     const snapshot = structuredClone(data);
     autoAdaptNetwork(data);
     expect(data).toEqual(snapshot);
+  });
+});
+
+describe('razvodni ormar', () => {
+  const planOf = (data: ProjectData) => analyzeProject(data.nodes, data.appliances, data.circuits, routeOf(data)).board;
+  const circuit = (id: string, overrides: Partial<ElectricalCircuit> = {}): ElectricalCircuit => ({
+    ...INITIAL_CIRCUITS[0], id, code: id, mainJunctionBoxId: '', ...overrides,
+  });
+
+  it('svaki krug je točno jednom, pod jednom FID sklopkom', () => {
+    const data = createExampleProject();
+    const plan = planOf(data);
+    const ids = plan.groups.flatMap((g) => g.circuits.map((c) => c.circuit.id));
+    expect([...ids].sort()).toEqual(data.circuits.map((c) => c.id).sort());
+  });
+
+  it('stezaljke su redom i bez ponavljanja', () => {
+    const plan = planOf(createExampleProject());
+    const terminals = plan.groups.flatMap((g) => g.circuits.map((c) => c.terminal));
+    expect(terminals).toEqual(terminals.map((_, i) => i + 1));
+  });
+
+  it('jednofazna instalacija koristi 2P sklopke', () => {
+    const plan = planOf(createExampleProject());
+    expect(plan.supplyPhases).toBe(1);
+    expect(plan.mainSwitch.poles).toBe(2);
+    expect(plan.groups.every((g) => g.poles === 2)).toBe(true);
+  });
+
+  it('trofazni krug traži 4P sklopke i sve tri faze', () => {
+    const plan = planDistributionBoard(
+      [circuit('a', { phaseType: '3P' }), circuit('b')],
+      new Map([['a', 6000], ['b', 1000]]),
+      []
+    );
+    expect(plan.supplyPhases).toBe(3);
+    expect(plan.groups.every((g) => g.poles === 4)).toBe(true);
+    const three = plan.groups.flatMap((g) => g.circuits).find((c) => c.circuit.id === 'a')!;
+    expect(three.phases).toEqual(['L1', 'L2', 'L3']);
+  });
+
+  it('faze su uravnotežene', () => {
+    const circuits = [circuit('t', { phaseType: '3P' }), ...['a', 'b', 'c', 'd', 'e', 'f'].map((id) => circuit(id))];
+    const plan = planDistributionBoard(
+      circuits,
+      new Map([['t', 300], ['a', 3000], ['b', 3000], ['c', 3000], ['d', 1000], ['e', 1000], ['f', 1000]]),
+      []
+    );
+    const loads = Object.values(plan.phaseLoadsWatts);
+    expect(Math.max(...loads) - Math.min(...loads)).toBeLessThan(1);
+  });
+
+  it('rasvjeta je podijeljena na više FID sklopki', () => {
+    const lightCircuits = [circuit('l1'), circuit('l2'), circuit('s1'), circuit('s2')];
+    const nodes: ElectricalNode[] = ['l1', 'l2'].map((id) => ({
+      id, surface: 'ceiling', category: 'light_ceiling', label: id, x: 1, y: 1, circuitId: id,
+    }));
+    const plan = planDistributionBoard(lightCircuits, new Map(), nodes);
+    const groupOf = (id: string) => plan.groups.findIndex((g) => g.circuits.some((c) => c.circuit.id === id));
+    expect(groupOf('l1')).not.toBe(groupOf('l2'));
+  });
+
+  it('najviše šest krugova po FID sklopki', () => {
+    const many = Array.from({ length: 14 }, (_, i) => circuit(`c${i}`));
+    const plan = planDistributionBoard(many, new Map(), []);
+    expect(plan.groups).toHaveLength(3);
+    expect(plan.groups.every((g) => g.circuits.length <= 6)).toBe(true);
+  });
+
+  it('jedan krug ima jednu FID sklopku, a bez krugova nema ormara', () => {
+    expect(planDistributionBoard([circuit('a')], new Map(), []).groups).toHaveLength(1);
+    expect(planDistributionBoard([], new Map(), []).groups).toEqual([]);
+  });
+
+  it('veće opterećenje podiže nazivnu struju glavne sklopke i FID-a', () => {
+    const plan = planDistributionBoard(
+      [circuit('a'), circuit('b')],
+      new Map([['a', 6000], ['b', 6000]]),
+      []
+    );
+    expect(plan.mainSwitch.ratedAmps).toBe(63);
+    expect(plan.groups[0].ratedAmps).toBe(63);
+  });
+
+  it('ormar ima rezervu i standardnu veličinu', () => {
+    const plan = planOf(createExampleProject());
+    expect(plan.modules.enclosure).toBeGreaterThanOrEqual(Math.ceil(plan.modules.used * 1.2));
+    expect([12, 18, 24, 36, 48, 54, 72, 96]).toContain(plan.modules.enclosure);
+  });
+
+  it('troškovnik sadrži točan broj FID sklopki i sabirnica', () => {
+    const data = createExampleProject();
+    const { bom, board } = analyzeProject(data.nodes, data.appliances, data.circuits, routeOf(data));
+    const fid = Object.entries(bom.breakersBySpec).find(([k]) => k.startsWith('FID sklopka'))!;
+    expect(fid[1]).toBe(board.groups.length);
+    expect(bom.breakersBySpec['Nulska sabirnica (po jedna za svaku FID sklopku)']).toBe(board.groups.length);
+    expect(bom.breakersBySpec['Sabirnica zaštitnog vodiča PE']).toBe(1);
+  });
+});
+
+describe('vodovi iz ormara', () => {
+  const data = createExampleProject();
+  const segs = routeOf(data);
+  const { board } = analyzeProject(data.nodes, data.appliances, data.circuits, segs);
+  const all = board.groups.flatMap((g) => g.circuits);
+
+  it('ormar prikazuje točno one vodove koje crta nacrt', () => {
+    const fromDrawing = new Set(segs.filter((s) => s.fromNodeId === 'node-ro-1').map((s) => s.toNodeId));
+    const fromBoard = all.flatMap((c) => c.cables.map((cable) => cable.nodeId));
+    expect(fromDrawing.size).toBe(10);
+    expect(fromBoard).toHaveLength(fromDrawing.size);
+    expect(new Set(fromBoard)).toEqual(fromDrawing);
+  });
+
+  it('vod ide pod osigurač kruga svog elementa', () => {
+    const count = (id: string) => all.find((c) => c.circuit.id === id)!.cables.length;
+    expect(count('cir-1')).toBe(4);
+    expect(count('cir-2')).toBe(1);
+    expect(count('cir-6')).toBe(2);
+  });
+
+  it('vod prekidača nosi fazu i komutiranu fazu, a svjetiljke komutiranu fazu i nulu', () => {
+    const light = all.find((c) => c.circuit.id === 'cir-6')!;
+    const conductors = (label: string) => light.cables.find((c) => c.label === label)!.conductors;
+    expect(conductors('P1-1')).toEqual(expect.arrayContaining(['L', 'L_switched', 'PE']));
+    expect(conductors('P1-1')).not.toContain('N');
+    expect(conductors('RS-1')).toEqual(expect.arrayContaining(['L_switched', 'N', 'PE']));
+    expect(conductors('RS-1')).not.toContain('L');
+  });
+});
+
+describe('raspored na DIN letvi', () => {
+  const circuit = (id: string, overrides: Partial<ElectricalCircuit> = {}): ElectricalCircuit => ({
+    ...INITIAL_CIRCUITS[0], id, code: id, mainJunctionBoxId: '', ...overrides,
+  });
+  const check = (circuits: ElectricalCircuit[]) => {
+    const plan = planDistributionBoard(circuits, new Map(), []);
+    const layout = layoutBoardRails(plan);
+    for (const row of layout.rows) {
+      let end = 0;
+      for (const item of [...row].sort((a, b) => a.start - b.start)) {
+        expect(item.start).toBeGreaterThanOrEqual(end);
+        end = item.start + item.modules;
+      }
+      expect(end).toBeLessThanOrEqual(layout.perRow);
+    }
+    return { plan, layout };
+  };
+
+  it('svaki osigurač je točno jednom na letvi', () => {
+    const data = createExampleProject();
+    const { layout } = check(data.circuits);
+    const placed = layout.rows.flat().flatMap((i) => (i.kind === 'breaker' ? [i.item.circuit.id] : []));
+    expect([...placed].sort()).toEqual(data.circuits.map((c) => c.id).sort());
+  });
+
+  it('uz glavnu sklopku i svaku FID sklopku ostaje prolaz za vodove', () => {
+    const { layout, plan } = check(createExampleProject().circuits);
+    const passes = layout.rows.flat().filter((i) => i.kind === 'pass');
+    expect(passes).toHaveLength(plan.groups.length + 1);
+  });
+
+  it('veliki ormar prelazi u više redova bez preklapanja', () => {
+    const { layout } = check(Array.from({ length: 30 }, (_, i) => circuit(`c${i}`)));
+    expect(layout.rows.length).toBeGreaterThan(1);
+  });
+
+  it('trofazni osigurači zauzimaju tri modula', () => {
+    const { layout } = check([circuit('a', { phaseType: '3P' }), circuit('b')]);
+    const three = layout.rows.flat().find((i) => i.kind === 'breaker' && i.item.circuit.id === 'a')!;
+    expect(three.modules).toBe(3);
   });
 });
 

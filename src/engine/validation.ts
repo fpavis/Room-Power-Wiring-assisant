@@ -1,4 +1,4 @@
-import { FurnitureItem, RoomDimensions, WallOpening } from '../types/electrical';
+import { ElectricalNode, FurnitureItem, RoomDimensions, WallOpening } from '../types/electrical';
 import { furnitureBlockingOpening } from './furniture';
 import { formatMeters, getSurfaceSize } from './geometry';
 
@@ -25,7 +25,8 @@ export type OpeningErrors = Partial<Record<OpeningField, string>>;
 export function validateOpening(
   op: Pick<WallOpening, 'wall' | 'type' | OpeningField>,
   room: RoomDimensions,
-  furniture: FurnitureItem[] = []
+  furniture: FurnitureItem[] = [],
+  nodes: ElectricalNode[] = []
 ): OpeningErrors {
   const errors: OpeningErrors = {};
   const wallWidth = getSurfaceSize(op.wall, room).width;
@@ -55,6 +56,15 @@ export function validateOpening(
   if (Object.keys(errors).length === 0) {
     const blocking = furnitureBlockingOpening(op, room, furniture);
     if (blocking) errors.offsetFromLeft = `Na tom mjestu je namještaj: ${blocking.name}.`;
+    const element = nodes.find(
+      (n) =>
+        n.surface === op.wall &&
+        n.x > op.offsetFromLeft - 0.05 &&
+        n.x < op.offsetFromLeft + op.width + 0.05 &&
+        n.y > op.sillHeight - 0.05 &&
+        n.y < op.sillHeight + op.height + 0.05
+    );
+    if (element) errors.offsetFromLeft = `Na tom mjestu je element ${element.label.split(' ')[0]}.`;
   }
   return errors;
 }

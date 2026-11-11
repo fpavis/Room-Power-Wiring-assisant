@@ -39,7 +39,7 @@ export default defineConfig(() => {
       },
     },
     test: {
-      include: ['src/**/*.test.ts'],
+      include: ['src/**/*.test.{ts,tsx}'],
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.

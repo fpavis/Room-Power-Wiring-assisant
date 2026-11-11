@@ -76,7 +76,7 @@ test('vrata se povlače po podu i zaključaju, kote su vidljive', async ({ page 
   const box = (await door.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
-  await page.mouse.move(box.x + box.width / 2 + 8, box.y + box.height / 2 - 60, { steps: 6 });
+  await page.mouse.move(box.x + box.width / 2 + 11, box.y + box.height / 2 - 60, { steps: 6 });
   await expect(page.getByTestId('otvor-status')).toContainText('Vrata do poda');
   await page.mouse.up();
   await expect(page.getByTestId('otvor-status')).toHaveCount(0);
@@ -196,6 +196,197 @@ test('tipka u koraku trošila traži potvrdu i ispisuje promjene', async ({ page
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
+test('razvodni ormar prikazuje sve krugove, FID sklopke i ispis', async ({ page }) => {
+  await step(page, '4 Provjera i ispis').click();
+  await page.getByRole('button', { name: 'Prikaži razvodni ormar' }).click();
+  const diagram = page.getByTestId('shema-ormara');
+  await expect(diagram).toBeVisible();
+  for (let i = 1; i <= 6; i++) await expect(page.getByTestId(`krug-SK-${i}`)).toBeVisible();
+  await expect(page.getByTestId('fid-FID-1')).toBeVisible();
+  await expect(page.getByTestId('fid-FID-2')).toBeVisible();
+  await expect(diagram).toContainText('Glavna');
+  await expect(diagram).toContainText('N sabirnica FID-1');
+  await expect(page.getByRole('dialog')).toContainText('modula');
+  const overflow = await diagram.evaluate((el) => el.getBoundingClientRect().width);
+  expect(overflow).toBeGreaterThan(400);
+  await page.keyboard.press('Escape');
+
+  // Otvara se i iz svojstava ormara
+  await page.getByTestId('element-RO-1').locator('rect').click();
+  await page.getByRole('button', { name: 'Prikaži razvodni ormar' }).last().click();
+  await expect(diagram).toBeVisible();
+});
+
+test('uz nacrt se vidi ormar kakav je u stvarnosti, sa svakim vodom', async ({ page }) => {
+  await page.getByRole('button', { name: 'Ormar', exact: true }).click();
+  const view = page.getByTestId('izgled-ormara');
+  await expect(view).toBeVisible();
+  await expect(page.locator('[data-testid^="vod-SK-"]')).toHaveCount(10);
+  await expect(page.locator('[data-testid^="vod-SK-1-"]')).toHaveCount(4);
+  await expect(page.getByTestId('vod-SK-6-P1-1')).toHaveCount(1);
+  await expect(page.getByTestId('vod-SK-6-RS-1')).toHaveCount(1);
+  await expect(page.getByTestId('n-sabirnica-FID-1')).toHaveCount(1);
+  await expect(page.getByTestId('n-sabirnica-FID-2')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Svi zidovi' }).click();
+  await expect(page.locator('svg[data-scale]')).toBeVisible();
+});
+
+/** Ends of conductors that do not touch a terminal, a bar, a cable or another conductor. */
+async function looseWireEnds(page: Page) {
+  return page.getByTestId('izgled-ormara').evaluate((svg) => {
+    const parse = (d: string) =>
+      d.split(/(?=[ML])/).map((part) => part.slice(1).trim().split(' ').map(Number) as [number, number]);
+    const wires = [...svg.querySelectorAll('[data-wire] path:first-child')].map((p) =>
+      parse(p.getAttribute('d')!)
+    );
+    const screws = [...svg.querySelectorAll('[data-screw]')].map((c) => [
+      Number(c.getAttribute('cx')),
+      Number(c.getAttribute('cy')),
+    ]);
+    const bars = [...svg.querySelectorAll('[data-bar]')].map((r) => [
+      Number(r.getAttribute('x')),
+      Number(r.getAttribute('y')),
+      Number(r.getAttribute('width')),
+      Number(r.getAttribute('height')),
+    ]);
+    const cableEnds = [...svg.querySelectorAll('[data-cable-end]')].map((c) =>
+      c.getAttribute('data-cable-end')!.split(',').map(Number)
+    );
+    const onSegment = (p: number[], a: number[], b: number[]) => {
+      const tol = 0.6;
+      return (
+        p[0] >= Math.min(a[0], b[0]) - tol &&
+        p[0] <= Math.max(a[0], b[0]) + tol &&
+        p[1] >= Math.min(a[1], b[1]) - tol &&
+        p[1] <= Math.max(a[1], b[1]) + tol
+      );
+    };
+    const loose: string[] = [];
+    wires.forEach((wire, index) => {
+      for (const end of [wire[0], wire[wire.length - 1]]) {
+        const touches =
+          screws.some((s) => Math.hypot(s[0] - end[0], s[1] - end[1]) <= 1) ||
+          bars.some((b) => end[0] >= b[0] - 1 && end[0] <= b[0] + b[2] + 1 && end[1] >= b[1] - 1 && end[1] <= b[1] + b[3] + 1) ||
+          cableEnds.some((c) => Math.hypot(c[0] - end[0], c[1] - end[1]) <= 8) ||
+          wires.some(
+            (other, o) =>
+              o !== index && other.slice(1).some((p, i) => onSegment(end, other[i], p))
+          );
+        if (!touches) loose.push(`${index}: ${end.join(',')}`);
+      }
+    });
+    const diagonal = wires.flatMap((wire, index) =>
+      wire.slice(1).flatMap((p, i) =>
+        Math.abs(p[0] - wire[i][0]) > 0.01 && Math.abs(p[1] - wire[i][1]) > 0.01 ? [`kosi ${index}`] : []
+      )
+    );
+    return [...loose, ...diagonal];
+  });
+}
+
+test('klik na krug ističe samo njegove vodove u ormaru', async ({ page }) => {
+  await page.getByRole('button', { name: 'Ormar', exact: true }).click();
+  const view = page.getByTestId('izgled-ormara');
+  await expect(view).toBeVisible();
+  await expect(page.getByTestId('legenda-ormara')).toContainText('Nula N');
+  await expect(view.locator('[data-dim]')).toHaveCount(0);
+
+  await page.getByTestId('ormar-krug-SK-1').click();
+  await page.mouse.move(5, 5);
+  await expect(view.locator('[data-dim] [data-testid^="vod-SK-1-"]')).toHaveCount(0);
+  await expect(view.locator('[data-dim] [data-testid^="vod-SK-"]')).toHaveCount(6);
+  await expect(page.getByTestId('ormar-krug-SK-1')).toHaveAttribute('aria-pressed', 'true');
+
+  await page.getByRole('button', { name: 'Prikaži sve krugove' }).click();
+  await expect(view.locator('[data-dim]')).toHaveCount(0);
+
+  // FID sklopka ističe cijelu svoju grupu
+  await page.getByTestId('ormar-FID-2').click();
+  await page.mouse.move(5, 5);
+  await expect(view.locator('[data-dim] [data-testid^="vod-SK-"]')).toHaveCount(8);
+});
+
+test('svaki vod u ormaru je spojen i pod pravim kutom', async ({ page }) => {
+  await page.getByRole('button', { name: 'Ormar', exact: true }).click();
+  await expect(page.getByTestId('izgled-ormara')).toBeVisible();
+  expect(await looseWireEnds(page)).toEqual([]);
+});
+
+test('veliki trofazni ormar: vodovi su spojeni i preko više redova', async ({ page }) => {
+  const circuits = Array.from({ length: 12 }, (_, i) => ({
+    id: `c${i}`,
+    code: `SK-${i + 1}`,
+    name: `Krug ${i + 1}`,
+    breakerAmps: 16,
+    breakerCurve: 'B',
+    phaseType: '3P',
+    cableCrossSection: 2.5,
+    color: '#0A5FC4',
+    mainJunctionBoxId: '',
+  }));
+  const file = JSON.stringify({
+    format: 'elektroplan',
+    schemaVersion: 1,
+    name: 'Veliki',
+    data: { room: { length: 4, width: 3, height: 2.6 }, openings: [], furniture: [], nodes: [], circuits, appliances: [] },
+  });
+  await page.getByRole('button', { name: 'Primjer: stan' }).click();
+  await page.getByRole('button', { name: 'Moji projekti' }).click();
+  await page.getByLabel('Datoteka projekta').setInputFiles({
+    name: 'veliki.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(file),
+  });
+  await expect(page.getByTestId('nacrt')).toBeVisible();
+  await page.getByRole('button', { name: 'Ormar', exact: true }).click();
+  await expect(page.getByTestId('izgled-ormara')).toBeVisible();
+  expect(await looseWireEnds(page)).toEqual([]);
+});
+
+test('potpuno nov projekt: sve se računa i prikazuje iz njegovih podataka', async ({ page }) => {
+  await page.getByRole('button', { name: 'Primjer: stan' }).click();
+  await page.getByRole('button', { name: 'Moji projekti' }).click();
+  await page.getByRole('button', { name: 'Novi projekt' }).click();
+  await expect(page.locator('[data-testid^=element-]')).toHaveCount(0);
+
+  const add = (name: RegExp) => page.getByRole('button', { name }).click();
+  await add(/RO Razvodni ormar/);
+  await add(/U2 Dvostruka/);
+  await expect(page.locator('[data-testid^=element-]')).toHaveCount(2);
+
+  const openBoard = async () => {
+    await page.getByRole('button', { name: 'Ormar', exact: true }).click();
+    await expect(page.getByTestId('izgled-ormara')).toBeVisible();
+  };
+  await openBoard();
+  await expect(page.locator('[data-testid^="vod-SK-"]')).toHaveCount(1);
+  expect(await looseWireEnds(page)).toEqual([]);
+
+  await page.getByRole('button', { name: 'Svi zidovi' }).click();
+  await add(/U1 Jednostruka/);
+  await add(/P1 Jednopolni/);
+  await openBoard();
+  await expect(page.locator('[data-testid^="vod-SK-"]')).toHaveCount(3);
+  expect(await looseWireEnds(page)).toEqual([]);
+
+  // Promjena dimenzija odmah mijenja duljine kabela
+  await page.getByRole('button', { name: 'Svi zidovi' }).click();
+  const before = await page.locator('footer').innerText();
+  await step(page, '1 Prostorija').click();
+  await page.getByLabel('Dužina (m)').fill('9');
+  await page.getByLabel('Dužina (m)').press('Enter');
+  await expect(page.locator('footer')).not.toHaveText(before);
+
+  // Trošilo mijenja bilancu i krug
+  await step(page, '3 Trošila i krugovi').click();
+  await page.getByRole('button', { name: /^Ugradbena pećnica\s*3200/ }).click();
+  await expect(page.locator('footer')).toContainText('1 trošila');
+  await page.getByLabel('Utičnica za Ugradbena pećnica').selectOption({ index: 1 });
+  await step(page, '4 Provjera i ispis').click();
+  await page.getByRole('button', { name: 'Prikaži razvodni ormar' }).click();
+  await expect(page.getByRole('dialog')).toContainText('3200 W');
+});
+
 test('trošilo se dodjeljuje povlačenjem na utičnicu i vidi se kao tag', async ({ page }) => {
   await step(page, '3 Trošila i krugovi').click();
   await page.getByRole('button', { name: /Mikrovalna/ }).click();
@@ -210,6 +401,26 @@ test('trošilo se dodjeljuje povlačenjem na utičnicu i vidi se kao tag', async
   await expect(page.getByTestId('tag-U-8')).toBeVisible();
   await expect(row).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Odvoji Mikrovalna pećnica' }).first()).toBeVisible();
+});
+
+test('nasuprotni zid može skroz lijevo ili skroz desno, i u 3D prikazu', async ({ page }) => {
+  const captions = () =>
+    page.locator('svg[data-scale]').evaluate((svg) =>
+      [...svg.querySelectorAll('text')]
+        .filter((t) => /^(Sjever|Istok|Jug|Zapad)/.test(t.textContent ?? ''))
+        .sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x)
+        .map((t) => (t.textContent ?? '').split(' ')[0])
+    );
+  expect(await captions()).toEqual(['Jug', 'Zapad', 'Sjever', 'Istok']);
+  await page.getByTestId('nasuprotni-left').click();
+  expect(await captions()).toEqual(['Istok', 'Jug', 'Zapad', 'Sjever']);
+  await page.getByRole('button', { name: '3D' }).click();
+  await expect(page.locator('canvas')).toBeVisible();
+  await expect(page.getByTestId('nasuprotni-left')).toHaveAttribute('aria-pressed', 'true');
+  await page.getByTestId('nasuprotni-right').click();
+  await page.waitForTimeout(300);
+  await page.reload();
+  await expect(page.getByTestId('nasuprotni-right')).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('zum ne deformira nacrt', async ({ page }) => {

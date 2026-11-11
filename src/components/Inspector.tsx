@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, Trash2, X, Zap } from 'lucide-react';
+import { Plus, Server, Trash2, X, Zap } from 'lucide-react';
 import { ELEMENT_CATALOG, WALL_META } from '../data/presets';
 import {
   getSurfaceSize,
@@ -31,6 +31,7 @@ export function Inspector({
   onClose,
   onSelect,
   onShowWiring,
+  onShowBoard,
 }: {
   node: ElectricalNode;
   data: ProjectData;
@@ -39,6 +40,7 @@ export function Inspector({
   onClose: () => void;
   onSelect: (id: string | null) => void;
   onShowWiring: () => void;
+  onShowBoard: () => void;
 }) {
   const { room, openings, nodes, circuits } = data;
   const size = getSurfaceSize(node.surface, room);
@@ -131,7 +133,16 @@ export function Inspector({
             id="krug-elementa"
             className="field"
             value={node.circuitId}
-            onChange={(e) => apply((d) => updateNode(d, node.id, { circuitId: e.target.value }))}
+            onChange={(e) =>
+              apply((d) => {
+                const box = d.nodes.find((n) => n.id === node.parentBoxId);
+                const keepsBox = box?.category !== 'junction_box' || box.circuitId === e.target.value;
+                return updateNode(d, node.id, {
+                  circuitId: e.target.value,
+                  parentBoxId: keepsBox ? node.parentBoxId : d.nodes.find((n) => n.category === 'distribution_board')?.id,
+                });
+              })
+            }
           >
             {circuits.map((c) => (
               <option key={c.id} value={c.id}>
@@ -303,9 +314,15 @@ export function Inspector({
         </div>
       )}
 
-      <button className="btn btn-primary w-full" onClick={onShowWiring}>
-        <Zap className="w-4 h-4" /> Spajanje L, N, PE
-      </button>
+      {isBoard ? (
+        <button className="btn btn-primary w-full" onClick={onShowBoard}>
+          <Server className="w-4 h-4" /> Prikaži razvodni ormar
+        </button>
+      ) : (
+        <button className="btn btn-primary w-full" onClick={onShowWiring}>
+          <Zap className="w-4 h-4" /> Spajanje L, N, PE
+        </button>
+      )}
       <button
         className="btn btn-danger w-full"
         onClick={() => {

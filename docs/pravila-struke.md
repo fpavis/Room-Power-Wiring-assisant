@@ -18,6 +18,9 @@ Pregled pravila koja aplikacija provodi. Aplikacija je pomoć pri planiranju i n
 | Šuko utičnica najviše 16 A | upozorenje i smanjenje osigurača | `rules.ts`, `projectOps.ts` | nazivna struja utičnice |
 | Jače jednofazno trošilo | fiksni priključak, 20 A, 4 mm² | `projectOps.ts` | uobičajena praksa, provjeriti prema načinu polaganja |
 | Rasvjeta odvojena od utičnica | preporuka i razdvajanje | `rules.ts`, `projectOps.ts` | uobičajena praksa |
+| Nula svakog kruga na sabirnici svoje FID sklopke | shema ormara | `board.ts`, `BoardDiagram.tsx` | VIOX, split-load ploče |
+| PE ne prolazi kroz FID | shema ormara | `BoardDiagram.tsx` | princip rada FID sklopke |
+| Odvodnik prenapona tip 2 | u ormaru i troškovniku | `board.ts` | DIN VDE 0100-443 (DEHN); provjeriti obveznost u HR |
 
 ## Broj žila
 
@@ -37,12 +40,19 @@ Pregled pravila koja aplikacija provodi. Aplikacija je pomoć pri planiranju i n
 - Kote zona uzete su iz sekundarnih izvora za DIN 18015-3:2007. Za izdanje 2016 tekst norme nije bio dostupan.
 - DIN norme nisu obvezne u Hrvatskoj. Obvezuje Tehnički propis za niskonaponske električne instalacije (NN 5/2010) i norme na koje upućuje.
 
+## Razvodni ormar: odluke prakse
+
+Broj FID sklopki (najviše 6 krugova po sklopki, najmanje 2 kad ima više krugova), raspodjela rasvjete, rezerva od 20 % modula i veličine ormara pravila su dobre prakse u aplikaciji. Pretraživanjem nisu potvrđeni kao zahtjev norme. Jednofazno ili trofazno napajanje aplikacija određuje prema tome ima li trofaznih krugova; stvarni priključak treba provjeriti.
+
 ## Još nije modelirano
 
 Zone kupaonice (HD 60364-7-701), izjednačenje potencijala, selektivnost zaštite, korekcijski faktori za grupiranje vodova i ispitivanje izvedene instalacije.
 
 ## Izvori
 
+- [VIOX: zajednička nula i FID](https://viox.com/shared-neutrals-rcd-rcbo-tripping/)
+- [DEHN: prenaponska zaštita u stambenim zgradama](https://www.dehn.de/sites/default/files/media/files/Wissen_kompakt_D294_D.pdf)
+- [ABB: izbor FID sklopki](https://content.voltimum.com/de/118038/9akk107991a4336_rev_a_15_auswahl_umsetzung_fi_elektrospicker_112020.pdf)
 - [Baunetzwissen: Leitungsverlegung und Installationszonen](https://www.baunetzwissen.de/elektro/fachwissen/leitungen-verteiler/leitungsverlegung-und-installationszonen-153012)
 - [de: Installationszonen, DE 21/07](https://elektro.net/file/show/80402/e0567a/DE_21_07_EI42.pdf)
 - [Tehnički propis za niskonaponske električne instalacije, NN 5/2010](https://narodne-novine.nn.hr/clanci/sluzbeni/2010_01_5_132.html)

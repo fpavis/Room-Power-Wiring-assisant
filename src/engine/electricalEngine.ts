@@ -14,6 +14,7 @@ import {
   WallOpening,
   WireConductor,
 } from '../types/electrical';
+import { BoardPlan, boardBillOfMaterials, planDistributionBoard } from './board';
 import { formatNumber, getSurfaceSize } from './geometry';
 
 export { getSurfaceSize };
@@ -55,6 +56,44 @@ export interface SnapResult {
 
 const STANDARD_WALL_HEIGHTS = [0.3, 0.45, 0.6, 1.05, 1.15, 1.85, 2.2, 2.3];
 
+/** Default reach of a snap in metres; the drawing passes one that follows the zoom. */
+export const DEFAULT_SNAP_TOLERANCE = 0.08;
+
+interface SnapCandidate {
+  value: number;
+  nodeId?: string;
+  /** Lower wins when two candidates are equally near. */
+  rank: number;
+}
+
+function nearestCandidate(
+  raw: number,
+  candidates: SnapCandidate[],
+  tolerance: number,
+  sticky: number | undefined
+): SnapCandidate | null {
+  // A guide already holding the element keeps it a little longer, so it does not flicker.
+  if (sticky !== undefined && Math.abs(raw - sticky) <= tolerance * 1.6) {
+    const held = candidates.find((c) => Math.abs(c.value - sticky) < 1e-6);
+    if (held) return held;
+  }
+  let best: SnapCandidate | null = null;
+  for (const c of candidates) {
+    const distance = Math.abs(c.value - raw);
+    if (distance > tolerance) continue;
+    const bestDistance = best ? Math.abs(best.value - raw) : Infinity;
+    if (distance < bestDistance - 1e-9 || (Math.abs(distance - bestDistance) <= 1e-9 && c.rank < best!.rank)) {
+      best = c;
+    }
+  }
+  return best;
+}
+
+/**
+ * Position for an element being placed. It snaps to the nearest guide within `tolerance`:
+ * other elements, standard heights, the installation zone, the middle of the surface and
+ * 15 cm beside openings.
+ */
 export function computeSnapAndDimensions(
   surface: SurfaceId,
   rawX: number,
@@ -63,68 +102,70 @@ export function computeSnapAndDimensions(
   nodes: ElectricalNode[],
   openings: WallOpening[],
   excludeNodeId?: string,
-  enableSnap = true
+  enableSnap = true,
+  tolerance = DEFAULT_SNAP_TOLERANCE,
+  sticky?: { x?: number; y?: number }
 ): SnapResult {
   const { width, height } = getSurfaceSize(surface, room);
-  let x = Math.max(0.1, Math.min(width - 0.1, Number(rawX.toFixed(2))));
-  let y = Math.max(0.1, Math.min(height - 0.1, Number(rawY.toFixed(2))));
+  const margin = Math.min(0.1, width / 4, height / 4);
+  const clampX = (v: number) => Math.max(margin, Math.min(width - margin, v));
+  const clampY = (v: number) => Math.max(margin, Math.min(height - margin, v));
+  let x = Math.round(clampX(rawX) * 100) / 100;
+  let y = Math.round(clampY(rawY) * 100) / 100;
 
   let snappedXNodeId: string | undefined;
   let snappedYNodeId: string | undefined;
   let snappedStandardHeight: number | undefined;
 
   if (enableSnap) {
-    const surfaceNodes = nodes.filter(
-      (n) => n.surface === surface && n.id !== excludeNodeId
-    );
-    const SNAP_THRESHOLD = 0.08; // 8 cm magnetic snap to same axis
+    const others = nodes.filter((n) => n.surface === surface && n.id !== excludeNodeId);
+    const inside = (c: SnapCandidate, max: number) => c.value >= margin - 1e-9 && c.value <= max - margin + 1e-9;
 
-    for (const other of surfaceNodes) {
-      if (Math.abs(x - other.x) <= SNAP_THRESHOLD) {
-        x = other.x;
-        snappedXNodeId = other.id;
-        break;
-      }
-    }
-
-    for (const other of surfaceNodes) {
-      if (Math.abs(y - other.y) <= SNAP_THRESHOLD) {
-        y = other.y;
-        snappedYNodeId = other.id;
-        break;
-      }
-    }
-
-    // If not snapped to another node's Y on a wall, check standard installation heights
-    if (!snappedYNodeId && surface !== 'ceiling') {
-      for (const stdH of STANDARD_WALL_HEIGHTS) {
-        if (stdH < height && Math.abs(y - stdH) <= 0.04) {
-          y = stdH;
-          snappedStandardHeight = stdH;
-          break;
-        }
-      }
-      // Also check 30 cm from ceiling
-      const upperZone = Number((room.height - 0.3).toFixed(2));
-      if (Math.abs(y - upperZone) <= 0.04) {
-        y = upperZone;
-        snappedStandardHeight = upperZone;
-      }
-    }
-
-    // On ceiling, snap to center axes
+    const xCandidates: SnapCandidate[] = [
+      ...others.map((n) => ({ value: n.x, nodeId: n.id, rank: 0 })),
+      { value: width / 2, rank: 2 },
+    ];
+    const yCandidates: SnapCandidate[] = [
+      ...others.map((n) => ({ value: n.y, nodeId: n.id, rank: 0 })),
+    ];
     if (surface === 'ceiling') {
-      if (!snappedXNodeId && Math.abs(x - width / 2) <= 0.08) {
-        x = Number((width / 2).toFixed(2));
+      yCandidates.push({ value: height / 2, rank: 2 });
+    } else {
+      for (const h of STANDARD_WALL_HEIGHTS) yCandidates.push({ value: h, rank: 1 });
+      yCandidates.push({ value: room.height - 0.3, rank: 1 });
+      for (const op of openings.filter((o) => o.wall === surface)) {
+        xCandidates.push(
+          { value: op.offsetFromLeft - 0.15, rank: 1 },
+          { value: op.offsetFromLeft + op.width + 0.15, rank: 1 }
+        );
       }
-      if (!snappedYNodeId && Math.abs(y - height / 2) <= 0.08) {
-        y = Number((height / 2).toFixed(2));
-      }
+    }
+
+    const xHit = nearestCandidate(
+      clampX(rawX),
+      xCandidates.filter((c) => inside(c, width)),
+      tolerance,
+      sticky?.x
+    );
+    const yHit = nearestCandidate(
+      clampY(rawY),
+      yCandidates.filter((c) => inside(c, height)),
+      tolerance,
+      sticky?.y
+    );
+    if (xHit) {
+      x = xHit.value;
+      snappedXNodeId = xHit.nodeId ?? 'guide';
+    }
+    if (yHit) {
+      y = yHit.value;
+      if (yHit.nodeId) snappedYNodeId = yHit.nodeId;
+      else snappedStandardHeight = yHit.value;
     }
   }
 
-  x = Number(x.toFixed(2));
-  y = Number(y.toFixed(2));
+  x = Number(x.toFixed(3));
+  y = Number(y.toFixed(3));
 
   const collidingOpening = isPointInsideOpening(surface, x, y, openings, 0.05);
 
@@ -135,9 +176,9 @@ export function computeSnapAndDimensions(
     snappedYNodeId,
     snappedStandardHeight,
     kotaOdPoda: y,
-    kotaOdStropa: Number((height - y).toFixed(2)),
+    kotaOdStropa: Number((height - y).toFixed(3)),
     kotaOdLijevo: x,
-    kotaOdDesno: Number((width - x).toFixed(2)),
+    kotaOdDesno: Number((width - x).toFixed(3)),
     collidingOpening,
   };
 }
@@ -292,6 +333,17 @@ export function getOrderedWallsAroundCenter(
   return [leftWall, centerWall, rightWall, oppositeWall];
 }
 
+export type OppositeSide = 'left' | 'right';
+
+/** Walls as drawn in a row; the wall opposite the centre one goes on the chosen end. */
+export function getStripWallOrder(
+  centerWall: WallId,
+  oppositeSide: OppositeSide = 'right'
+): [WallId, WallId, WallId, WallId] {
+  const [left, center, right, opposite] = getOrderedWallsAroundCenter(centerWall);
+  return oppositeSide === 'left' ? [opposite, left, center, right] : [left, center, right, opposite];
+}
+
 /**
  * Resolves the parent feeding box (`junction_box` RK or `distribution_board` RO) for any electrical node.
  * Hierarchy:
@@ -380,6 +432,7 @@ export function analyzeProject(
   socketBalance: SocketBalanceSummary;
   circuitAnalyses: CircuitAnalysis[];
   bom: BomSummary;
+  board: BoardPlan;
 } {
   // 1. Socket vs Appliance Balance
   const totalSingleSockets = nodes.filter((n) => n.category === 'socket_single').length;
@@ -603,10 +656,13 @@ export function analyzeProject(
     const key = `Automatski osigurač ${c.phaseType} ${c.breakerCurve}${c.breakerAmps}A`;
     breakersBySpec[key] = (breakersBySpec[key] || 0) + 1;
   }
-  if (circuits.length > 0) {
-    const poles = circuits.some((c) => c.phaseType === '3P') ? '4P' : '2P';
-    breakersBySpec[`FID sklopka ${poles} 40 A / 30 mA`] = 1;
-  }
+  const board = planDistributionBoard(
+    circuits,
+    new Map(circuitAnalyses.map((c) => [c.circuit.id, c.totalPowerWatts])),
+    nodes,
+    segments
+  );
+  Object.assign(breakersBySpec, boardBillOfMaterials(board));
 
   const wagoConnectorsCount =
     countsByCategory.junction_box * 5 +
@@ -619,6 +675,7 @@ export function analyzeProject(
   return {
     socketBalance,
     circuitAnalyses,
+    board,
     bom: {
       cablesBySpec,
       conduitsByDiameter,

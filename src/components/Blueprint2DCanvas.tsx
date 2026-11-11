@@ -9,8 +9,9 @@ import { Lock, Maximize, ZoomIn, ZoomOut } from 'lucide-react';
 import { CONDUCTOR_META, WALL_META } from '../data/presets';
 import {
   computeSnapAndDimensions,
-  getOrderedWallsAroundCenter,
   getPrimaryJunctionBoxWall,
+  getStripWallOrder,
+  OppositeSide,
   SnapResult,
 } from '../engine/electricalEngine';
 import { computeFurnitureDrag } from '../engine/furniture';
@@ -70,6 +71,7 @@ interface Props {
   circuits: ElectricalCircuit[];
   segments: RoutedSegment[];
   appliances: ApplianceItem[];
+  oppositeSide: OppositeSide;
   furniture: FurnitureItem[];
   openingsEditable: boolean;
   activeSurface: SurfaceId;
@@ -122,7 +124,8 @@ function buildRects(
   room: RoomDimensions,
   center: WallId,
   layoutMode: Props['layoutMode'],
-  activeSurface: SurfaceId
+  activeSurface: SurfaceId,
+  oppositeSide: OppositeSide
 ): { rects: SurfaceRect[]; widthM: number; heightM: number } {
   const dims = (w: number, h: number) => `${formatMeters(w)} × ${formatMeters(h)} m`;
   const ceiling = getCeilingViewSize(room, center);
@@ -150,7 +153,7 @@ function buildRects(
 
   const rects: SurfaceRect[] = [];
   let x = 0;
-  for (const wall of getOrderedWallsAroundCenter(center)) {
+  for (const wall of getStripWallOrder(center, oppositeSide)) {
     const { width, height } = getSurfaceSize(wall, room);
     rects.push({
       surface: wall,
@@ -255,6 +258,7 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
     circuits,
     segments,
     appliances,
+    oppositeSide,
     furniture,
     openingsEditable,
     activeSurface,
@@ -291,7 +295,14 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
   const panStart = useRef<{ x: number; y: number; panX: number; panY: number; moved: boolean } | null>(null);
   const pinchDistance = useRef<number | null>(null);
   const didPan = useRef(false);
-  const [dragging, setDragging] = useState<{ id: string; key: string } | null>(null);
+  const [dragging, setDragging] = useState<{
+    id: string;
+    key: string;
+    surface: SurfaceId;
+    grabX: number;
+    grabY: number;
+  } | null>(null);
+  const stickySnap = useRef<{ surface: SurfaceId; x?: number; y?: number } | null>(null);
   const [snapPreview, setSnapPreview] = useState<{
     surface: SurfaceId;
     snap: SnapResult;
@@ -327,7 +338,7 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
   }, []);
 
   const center = getPrimaryJunctionBoxWall(nodes, selectedNodeId);
-  const wallRects = buildRects(room, center, layoutMode, activeSurface);
+  const wallRects = buildRects(room, center, layoutMode, activeSurface, oppositeSide);
   const { rects, widthM, heightM } = wallRects;
 
   // One factor for both axes, so the drawing can never be stretched.
@@ -475,27 +486,48 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
     return null;
   };
 
-  const snapAt = (clientX: number, clientY: number, excludeId?: string) => {
+  // Snaps reach about 9 screen pixels, so they feel the same at every zoom.
+  const snapReach = Math.min(0.2, Math.max(0.025, 9 / scale));
+
+  const snapAt = (
+    clientX: number,
+    clientY: number,
+    excludeId?: string,
+    grab?: { surface: SurfaceId; x: number; y: number }
+  ) => {
     const hit = pointerToStored(clientX, clientY);
-    if (!hit) return null;
-    return {
+    if (!hit) {
+      stickySnap.current = null;
+      return null;
+    }
+    const offset = grab && grab.surface === hit.surface ? grab : { x: 0, y: 0 };
+    const held = stickySnap.current?.surface === hit.surface ? stickySnap.current : undefined;
+    const snap = computeSnapAndDimensions(
+      hit.surface,
+      hit.x - offset.x,
+      hit.y - offset.y,
+      room,
+      nodes,
+      openings,
+      excludeId,
+      layers.snap,
+      snapReach,
+      held
+    );
+    stickySnap.current = {
       surface: hit.surface,
-      snap: computeSnapAndDimensions(
-        hit.surface,
-        hit.x,
-        hit.y,
-        room,
-        nodes,
-        openings,
-        excludeId,
-        layers.snap
-      ),
+      x: snap.snappedXNodeId ? snap.x : undefined,
+      y: snap.snappedYNodeId || snap.snappedStandardHeight !== undefined ? snap.y : undefined,
     };
+    return { surface: hit.surface, snap };
   };
 
   useImperativeHandle(ref, () => ({
     previewPaletteDrop: (x, y) => setSnapPreview(snapAt(x, y)),
-    clearPreview: () => setSnapPreview(null),
+    clearPreview: () => {
+      stickySnap.current = null;
+      setSnapPreview(null);
+    },
     highlightSocketAt: (clientX, clientY) => {
       const bounds = svgRef.current?.getBoundingClientRect();
       if (!bounds) return null;
@@ -537,9 +569,9 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
         const piece = furniture.find((f) => f.id === openingDrag.id);
         const result =
           openingDrag.kind === 'opening' && opening
-            ? computeOpeningDrag(opening, hit.surface, rawX, rawY, room, openings, nodes, furniture)
+            ? computeOpeningDrag(opening, hit.surface, rawX, rawY, room, openings, nodes, furniture, snapReach)
             : piece
-            ? computeFurnitureDrag(piece, hit.surface, rawX, rawY, room, furniture, openings)
+            ? computeFurnitureDrag(piece, hit.surface, rawX, rawY, room, furniture, openings, snapReach)
             : null;
         if (result) {
           setOpeningDrag({ ...openingDrag, result });
@@ -557,7 +589,11 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
       return;
     }
     if (!dragging) return;
-    const result = snapAt(e.clientX, e.clientY, dragging.id);
+    const result = snapAt(e.clientX, e.clientY, dragging.id, {
+      surface: dragging.surface,
+      x: dragging.grabX,
+      y: dragging.grabY,
+    });
     setSnapPreview(result);
     if (result && !result.snap.collidingOpening) {
       onMoveNode(dragging.id, result.surface, result.snap.x, result.snap.y, dragging.key);
@@ -565,6 +601,7 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
   };
 
   const endDrag = () => {
+    stickySnap.current = null;
     setOpeningDrag(null);
     setDragging(null);
     setSnapPreview(null);
@@ -1019,7 +1056,16 @@ export const Blueprint2DCanvas = forwardRef<CanvasHandle, Props>(function Bluepr
                     onSelectNode(node.id);
                     if (canDrag) {
                       dragCounter.current += 1;
-                      setDragging({ id: node.id, key: `drag-${dragCounter.current}` });
+                      // Keep the grabbed point under the pointer, so the element does not jump.
+                      const hit = pointerToStored(e.clientX, e.clientY);
+                      const sameSurface = hit?.surface === node.surface;
+                      setDragging({
+                        id: node.id,
+                        key: `drag-${dragCounter.current}`,
+                        surface: node.surface,
+                        grabX: sameSurface ? hit!.x - node.x : 0,
+                        grabY: sameSurface ? hit!.y - node.y : 0,
+                      });
                       svgRef.current?.setPointerCapture(e.pointerId);
                     }
                   }}

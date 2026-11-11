@@ -250,9 +250,9 @@ export function furnitureConflict(
   return other ? `Preklapa se s elementom: ${other.name}.` : null;
 }
 
-function closest(raw: number, options: OpeningLock[]): OpeningLock | null {
+function closest(raw: number, options: OpeningLock[], reach: number): OpeningLock | null {
   let best: OpeningLock | null = null;
-  let bestDistance = SNAP_DISTANCE;
+  let bestDistance = reach;
   for (const option of options) {
     const distance = Math.abs(option.value - raw);
     if (distance < bestDistance) {
@@ -271,7 +271,8 @@ export function computeFurnitureDrag(
   rawBottom: number,
   room: RoomDimensions,
   furniture: FurnitureItem[],
-  openings: WallOpening[]
+  openings: WallOpening[],
+  snapDistance = SNAP_DISTANCE
 ): OpeningDragResult {
   const wallWidth = getSurfaceSize(wall, room).width;
   const { width, height } = item;
@@ -337,8 +338,8 @@ export function computeFurnitureDrag(
       .map((o) => y(o.sillHeight - height, o.sillHeight, 'Ispod prozora')),
   ].filter((option) => option.value >= -TOUCH_TOLERANCE && option.value <= maxBottom + TOUCH_TOLERANCE);
 
-  const xLock = closest(offset, xOptions);
-  const yLock = closest(bottom, yOptions);
+  const xLock = closest(offset, xOptions, snapDistance);
+  const yLock = closest(bottom, yOptions, snapDistance);
   const locks = [xLock, yLock].filter((l): l is OpeningLock => l !== null);
   const offsetFromLeft = xLock ? roundMm(xLock.value) : Math.round(offset * 100) / 100;
   const finalBottom = yLock ? roundMm(yLock.value) : Math.round(bottom * 100) / 100;
